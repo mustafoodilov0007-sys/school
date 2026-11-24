@@ -9,12 +9,12 @@ export interface CreatedSession {
 /** Sessiya tokeni: bazada faqat SHA-256 hash; ochiq token foydalanuvchida (cookie yoki xotirada) qoladi. */
 export async function createSession(
   db: Db,
-  p: { subject: 'student' | 'admin'; subjectId: string; ttlHours: number; deviceId?: string | null; userAgent?: string | null },
+  p: { subject: 'student' | 'admin' | 'parent'; subjectId: string; ttlHours: number; deviceId?: string | null; userAgent?: string | null },
 ): Promise<CreatedSession> {
   const token = randomToken(32);
   const r = await db.query<{ expires_at: Date }>(
-    `INSERT INTO sessions (subject_type, student_id, admin_id, token_hash, device_id, user_agent, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6, now() + ($7::numeric * interval '1 hour'))
+    `INSERT INTO sessions (subject_type, student_id, admin_id, parent_id, token_hash, device_id, user_agent, expires_at)
+     VALUES ($1, $2, $3, $8, $4, $5, $6, now() + ($7::numeric * interval '1 hour'))
      RETURNING expires_at`,
     [
       p.subject,
@@ -24,6 +24,7 @@ export async function createSession(
       p.deviceId ?? null,
       p.userAgent?.slice(0, 300) ?? null,
       p.ttlHours,
+      p.subject === 'parent' ? p.subjectId : null,
     ],
   );
   return { token, expiresAt: (r.rows[0] as { expires_at: Date }).expires_at };

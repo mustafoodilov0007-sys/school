@@ -38,7 +38,21 @@ async function fail(res: Response): Promise<never> {
   throw new ApiFail(res.status, body?.error.code ?? 'UNKNOWN', body?.error.message ?? 'Xatolik');
 }
 
-export async function login(): Promise<StudentMeDto> {
+export interface ParentMe { id: string; firstName: string; lastName: string; children: { id: string; name: string; className: string }[] }
+export type LoginResult = { role: 'student'; student: StudentMeDto } | { role: 'parent'; parent: ParentMe };
+
+/** Ota-ona kodi bilan Telegram akkauntni bog'lash. */
+export async function linkParent(code: string): Promise<LoginResult> {
+  const initData = getInitData();
+  if (!initData) throw new ApiFail(0, 'NOT_TELEGRAM', 'Telegram ichida oching');
+  const res = await raw('/api/student/auth/parent-link', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ initData, code }) });
+  if (!res.ok) return fail(res);
+  const json = (await res.json()) as { token: string; parent: ParentMe };
+  token = json.token;
+  return { role: 'parent', parent: json.parent };
+}
+
+export async function login(): Promise<LoginResult> {
   const initData = getInitData();
   const body = initData
     ? { initData, deviceId: deviceId() }
@@ -52,9 +66,9 @@ export async function login(): Promise<StudentMeDto> {
     body: JSON.stringify(body),
   });
   if (!res.ok) return fail(res);
-  const json = (await res.json()) as { token: string; student: StudentMeDto };
+  const json = (await res.json()) as { role?: 'student' | 'parent'; token: string; student?: StudentMeDto; parent?: ParentMe };
   token = json.token;
-  return json.student;
+  return json.role === 'parent' && json.parent ? { role: 'parent', parent: json.parent } : { role: 'student', student: json.student as StudentMeDto };
 }
 
 /** 401 bo'lsa bir marta qayta kiradi (sessiya muddati tugagan bo'lishi mumkin). */

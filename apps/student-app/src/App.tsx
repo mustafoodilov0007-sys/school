@@ -7,6 +7,8 @@ import { Profile } from './pages/Profile';
 import { ExamPage } from './pages/ExamPage';
 import { ResultsPage } from './pages/Simple';
 import { SchoolPage } from './pages/School';
+import { ParentApp } from './pages/Parent';
+import { LinkScreen } from './pages/Link';
 
 type Tab = 'home' | 'exam' | 'school' | 'results' | 'profile';
 const TABS: { id: Tab; label: () => string; icon: string }[] = [
@@ -18,10 +20,12 @@ const TABS: { id: Tab; label: () => string; icon: string }[] = [
 ];
 
 export function App() {
-  const { state, retry } = useAuth();
+  const { state, retry, link } = useAuth();
   const [tab, setTab] = useState<Tab>('home');
 
   if (state.status === 'loading') return <Loading />;
+  if (state.status === 'unlinked') return <LinkScreen onLink={link} />;
+  if (state.status === 'ready' && state.role === 'parent') return <ParentApp parent={state.parent} />;
   if (state.status === 'error') return <ErrorState message={state.message} onRetry={state.retryable ? retry : undefined} />;
 
   return (

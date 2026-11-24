@@ -2,14 +2,10 @@ import { useState } from 'react';
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import { Spinner } from './components/ui';
 import { useAuth } from './lib/auth';
-import { SettingsPage } from './pages/Settings';
-import { AdministrationPage } from './pages/Administration';
 import { AuditPage } from './pages/Audit';
-import { Icon } from './components/icons';
-import { CORE_MODULES, EXAM_MODULES } from './lib/modules';
-import type { ModuleDef } from './lib/modules';
 import { AuthCallback, Login } from './pages/Login';
 import { AttendancePage, JournalPage, SchedulePage } from './pages/School';
+import { ParentsPage, TeachersPage } from './pages/People';
 import { Landing } from './pages/Landing';
 import { ClassesPage } from './pages/Classes';
 import { Dashboard } from './pages/Dashboard';
@@ -22,12 +18,33 @@ import { MaterialsPage } from './pages/Materials';
 import { MessagesPage } from './pages/Messages';
 import { ReportsPage } from './pages/Reports';
 
-const NavItem = ({ m, onClick }: { m: ModuleDef; onClick: () => void }) => (
-  <NavLink to={m.to} end={m.end} onClick={onClick} className={({ isActive }) => `side-item ${isActive ? 'active' : ''}`}>
-    <span className="side-ico"><Icon name={m.icon} size={19} /></span>
-    <span className="min-w-0"><span className="side-title block truncate">{m.title}</span><span className="side-sub block truncate">{m.sub}</span></span>
-  </NavLink>
-);
+const NAV: { group: string; adminOnly?: boolean; teacherOk?: boolean; items: { to: string; label: string; icon: string; end?: boolean }[] }[] = [
+  { group: 'Asosiy', teacherOk: true, items: [{ to: '/', label: 'Bosh sahifa', icon: '🏠', end: true }] },
+  { group: "O'quv jarayoni", items: [
+    { to: '/exams', label: 'Imtihonlar', icon: '📝' },
+    { to: '/questions', label: 'Savollar banki', icon: '❓' },
+    { to: '/materials', label: 'Materiallar', icon: '📚' },
+  ] },
+  { group: 'Maktab', teacherOk: true, items: [
+    { to: '/journal', label: 'Elektron jurnal', icon: '📒' },
+    { to: '/attendance', label: 'Davomat', icon: '✅' },
+    { to: '/schedule', label: 'Dars jadvali', icon: '🗓️' },
+  ] },
+  { group: "O'quvchilar", items: [
+    { to: '/classes', label: 'Sinflar', icon: '🏫' },
+    { to: '/students', label: "O'quvchilar", icon: '🎓' },
+  ] },
+  { group: 'Natija va aloqa', items: [
+    { to: '/reports', label: 'Hisobotlar', icon: '📊' },
+    { to: '/messages', label: 'Xabar yuborish', icon: '✉️' },
+    { to: '/complaints', label: 'Shikoyatlar', icon: '💬' },
+  ] },
+  { group: 'Foydalanuvchilar', adminOnly: true, items: [
+    { to: '/teachers', label: "O'qituvchilar", icon: '👨‍🏫' },
+    { to: '/parents', label: 'Ota-onalar', icon: '👪' },
+  ] },
+  { group: 'Tizim', items: [{ to: '/audit', label: 'Harakatlar tarixi', icon: '🕓' }] },
+];
 
 export function App() {
   const { loading, admin, logout } = useAuth();
@@ -42,40 +59,38 @@ export function App() {
         element={
           loading ? <Spinner /> : !admin ? <Navigate to="/welcome" replace /> : (
             <div className="min-h-screen md:flex">
-              <header className="side flex items-center justify-between px-4 py-3 md:hidden">
-                <div className="flex items-center gap-2 font-bold text-white"><span className="side-logo">⚛️</span>Physics Exam Pro</div>
-                <button className="side-btn" aria-label="Menyu" aria-expanded={menuOpen} aria-controls="admin-nav" onClick={() => setMenuOpen((v) => !v)}>
-                  <Icon name="menu" size={20} />
+              <header className="flex items-center justify-between border-b border-line bg-card px-4 py-3 md:hidden">
+                <div className="font-bold">Physics Exam Pro</div>
+                <button className="btn-sm" aria-expanded={menuOpen} aria-controls="admin-nav" onClick={() => setMenuOpen((v) => !v)}>
+                  {menuOpen ? 'Yopish' : 'Menyu'}
                 </button>
               </header>
-              <aside id="admin-nav" className={`side ${menuOpen ? 'block' : 'hidden'} w-full shrink-0 p-4 md:sticky md:top-0 md:flex md:h-screen md:w-[19rem] md:flex-col md:overflow-hidden`}>
-                <div className="mb-5 hidden items-center gap-3 px-1 md:flex">
-                  <span className="side-logo">⚛️</span>
-                  <div className="leading-tight"><div className="font-bold text-white">Physics Exam Pro</div><div className="text-xs text-white/60">Maktab boshqaruv platformasi</div></div>
-                </div>
-                <nav aria-label="Asosiy" className="side-scroll min-h-0 flex-1 space-y-1 md:overflow-y-auto">
-                  {CORE_MODULES.map((m) => <NavItem key={m.to} m={m} onClick={() => setMenuOpen(false)} />)}
-                  <div className="side-group">Fizika nazorati</div>
-                  {EXAM_MODULES.map((m) => <NavItem key={m.to} m={m} onClick={() => setMenuOpen(false)} />)}
+              <aside id="admin-nav" className={`${menuOpen ? 'block' : 'hidden'} w-full shrink-0 border-r border-line bg-card p-4 md:sticky md:top-0 md:block md:h-screen md:w-60 md:overflow-y-auto`}>
+                <div className="mb-1 hidden text-lg font-bold md:block">⚛️ Physics Exam Pro</div>
+                <div className="mb-5 hidden text-xs text-mute md:block">{admin.displayName ?? ''} · {admin.role === 'admin' ? 'Administrator' : "O'qituvchi"}</div>
+                <nav aria-label="Asosiy" className="space-y-4">
+                  {NAV.filter((g) => (admin.role === 'admin' ? true : g.teacherOk)).map((g) => (
+                    <div key={g.group}>
+                      <div className="mb-1 px-3 text-[11px] font-semibold uppercase tracking-wider text-mute">{g.group}</div>
+                      {g.items.map((n) => (
+                        <NavLink key={n.to} to={n.to} end={n.end} onClick={() => setMenuOpen(false)}
+                          className={({ isActive }) => `flex items-center gap-2 rounded-lg px-3 py-2 ${isActive ? 'bg-brand font-semibold text-brand-ink' : 'hover:bg-bg'}`}>
+                          <span aria-hidden="true">{n.icon}</span>{n.label}
+                        </NavLink>
+                      ))}
+                    </div>
+                  ))}
                 </nav>
-                <NavLink to="/administration" onClick={() => setMenuOpen(false)} className={({ isActive }) => `side-admin mt-4 shrink-0 ${isActive ? 'active' : ''}`}>
-                  <Icon name="shield" size={18} /><span>Administratsiya</span><Icon name="chevron" size={16} />
-                </NavLink>
-                <div className="side-user mt-4 shrink-0">
-                  <span className="side-ava" aria-hidden="true">{(admin.displayName ?? 'A').slice(0, 1).toUpperCase()}</span>
-                  <div className="min-w-0 flex-1 leading-tight"><div className="truncate text-sm font-semibold text-white">{admin.displayName ?? 'Administrator'}</div><div className="text-xs text-white/60">Administrator</div></div>
-                  <button className="side-btn" title="Chiqish" aria-label="Chiqish" onClick={() => void logout()}><Icon name="logout" size={18} /></button>
-                </div>
+                <button className="btn-sm mt-6 w-full justify-center" onClick={() => void logout()}>Chiqish</button>
               </aside>
-              <main className="mx-auto min-w-0 max-w-7xl flex-1 p-4 md:p-6">
+              <main className="mx-auto min-w-0 max-w-6xl flex-1 p-4 md:p-6">
                 <Routes>
                   <Route index element={<Dashboard />} />
-                  <Route path="journal/:classId" element={<JournalPage />} />
                   <Route path="journal" element={<JournalPage />} />
-                  <Route path="attendance/:classId" element={<AttendancePage />} />
                   <Route path="attendance" element={<AttendancePage />} />
-                  <Route path="schedule/:classId" element={<SchedulePage />} />
                   <Route path="schedule" element={<SchedulePage />} />
+                  <Route path="teachers" element={<TeachersPage />} />
+                  <Route path="parents" element={<ParentsPage />} />
                   <Route path="classes" element={<ClassesPage />} />
                   <Route path="students" element={<StudentsPage />} />
                   <Route path="questions" element={<QuestionsPage />} />
@@ -85,8 +100,6 @@ export function App() {
                   <Route path="complaints" element={<ComplaintsPage />} />
                   <Route path="messages" element={<MessagesPage />} />
                   <Route path="reports" element={<ReportsPage />} />
-                  <Route path="administration" element={<AdministrationPage />} />
-                  <Route path="settings" element={<SettingsPage />} />
                   <Route path="audit" element={<AuditPage />} />
                   <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>

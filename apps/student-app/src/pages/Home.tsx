@@ -17,7 +17,7 @@ export function Home({ onOpenExam }: { onOpenExam: () => void }) {
     api<{ exams: StudentExamDto[] }>('/api/student/exams').then((r) => setExams(r.exams), () => setExams([]));
     api<{ items: Material[] }>('/api/student/materials').then((r) => setMats(r.items), () => setMats([]));
   }, []);
-  if (state.status !== 'ready') return null;
+  if (state.status !== 'ready' || state.role !== 'student') return null;
   const s = state.student;
   const next = (exams ?? []).filter((e) => e.status !== 'finished').sort((a, b) => Date.parse(a.startsAt) - Date.parse(b.startsAt))[0];
   return (

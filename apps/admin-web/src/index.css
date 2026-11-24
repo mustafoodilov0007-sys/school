@@ -71,46 +71,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px
 .hero { @apply rounded-2xl bg-[rgb(var(--c-hero))] px-5 py-4 text-white; }
 .hero small { @apply block text-sm opacity-80; }
 .module-row { @apply flex items-center gap-3 rounded-xl px-2 py-2.5 hover:bg-bg; }
-.module-icon { @apply flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-soft text-brand; }
+.module-icon { @apply flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-soft text-xl; }
 .module-title { @apply font-semibold leading-tight; }
 .module-sub { @apply text-sm text-mute; }
 .module-row .chev { @apply ml-auto text-mute; }
-
-/* ---- Premium qatlam: yon menyu, kartalar, fon ---- */
-body { background-image: radial-gradient(1200px 500px at 85% -10%, rgb(var(--c-brand) / 0.08), transparent 60%); background-attachment: fixed; }
-.side { background: linear-gradient(185deg, #0a1431 0%, #0f1f46 55%, #0a1431 100%); color: rgb(207 216 243); }
-.side-logo { display: inline-flex; height: 2.5rem; width: 2.5rem; align-items: center; justify-content: center; border-radius: 0.8rem; background: linear-gradient(135deg, #2563eb, #4f8cff); box-shadow: 0 8px 20px rgb(37 99 235 / 0.4); font-size: 1.25rem; }
-.side-group { margin: 1.25rem 0.75rem 0.4rem; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: rgb(111 130 184); }
-.side-item { display: flex; align-items: center; gap: 0.75rem; border-radius: 0.85rem; padding: 0.45rem 0.6rem; transition: background 0.18s, transform 0.18s; }
-.side-item:hover { background: rgb(255 255 255 / 0.07); }
-.side-item:focus-visible { outline: 2px solid #8fb4ff; outline-offset: 1px; }
-.side-ico { display: flex; height: 2.25rem; width: 2.25rem; flex-shrink: 0; align-items: center; justify-content: center; border-radius: 0.7rem; background: rgb(255 255 255 / 0.08); }
-.side-title { font-size: 0.92rem; font-weight: 600; line-height: 1.15; color: #fff; }
-.side-sub { font-size: 0.72rem; color: rgb(143 160 207); }
-.side-item.active { background: linear-gradient(120deg, #2563eb, #3b7bff); box-shadow: 0 10px 24px rgb(37 99 235 / 0.38); }
-.side-item.active .side-ico { background: rgb(255 255 255 / 0.2); }
-.side-item.active .side-sub { color: rgb(219 230 255); }
-.side-user { display: flex; align-items: center; gap: 0.7rem; border-top: 1px solid rgb(255 255 255 / 0.1); padding-top: 1rem; }
-.side-ava { display: inline-flex; height: 2.25rem; width: 2.25rem; align-items: center; justify-content: center; border-radius: 0.7rem; background: linear-gradient(135deg, #2563eb, #4f8cff); font-weight: 700; color: #fff; }
-.side-btn { display: inline-flex; height: 2.25rem; width: 2.25rem; align-items: center; justify-content: center; border-radius: 0.7rem; background: rgb(255 255 255 / 0.1); color: #fff; transition: background 0.18s; }
-.side-btn:hover { background: rgb(255 255 255 / 0.2); }
-.card { transition: box-shadow 0.2s; }
-.module-row { transition: background 0.15s, transform 0.15s; }
-.module-row:hover { transform: translateX(2px); }
-@media print { .side { display: none !important; } }
-
-/* ---- Sinflar to'ri (eMaktab tartibi) va Administratsiya burchagi ---- */
-.class-col { min-width: 3.5rem; }
-.class-grade { font-size: 2.4rem; font-weight: 800; line-height: 1; color: rgb(var(--c-mute) / 0.45); margin-bottom: 0.5rem; }
-.class-link { display: block; border-radius: 0.5rem; padding: 0.25rem 0.5rem; margin-left: -0.5rem; font-size: 1.1rem; color: rgb(var(--c-brand)); transition: background 0.15s; }
-.class-link:hover { background: rgb(var(--c-soft)); text-decoration: underline; }
-.admin-cta { display: flex; align-items: center; gap: 0.9rem; border-radius: 1rem; padding: 0.9rem 1.1rem; color: #fff; background: linear-gradient(120deg, #1d3f87, #2563eb); box-shadow: 0 12px 28px rgb(37 99 235 / 0.28); transition: transform 0.15s; }
-.admin-cta:hover { transform: translateY(-1px); }
-.admin-cta .module-icon { background: rgb(255 255 255 / 0.18); color: #fff; }
-.admin-cta .module-title { color: #fff; }
-.admin-cta .module-sub { color: rgb(219 230 255); }
-.side-admin { display: flex; align-items: center; gap: 0.6rem; border-radius: 0.85rem; border: 1px dashed rgb(255 255 255 / 0.28); padding: 0.65rem 0.8rem; font-weight: 600; color: #fff; transition: background 0.18s; }
-.side-admin span { flex: 1; }
-.side-admin:hover { background: rgb(255 255 255 / 0.08); }
-.side-admin.active { border-style: solid; border-color: transparent; background: linear-gradient(120deg, #2563eb, #3b7bff); }
-.side-scroll { scrollbar-width: thin; scrollbar-color: rgb(255 255 255 / 0.25) transparent; }

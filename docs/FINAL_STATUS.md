@@ -54,3 +54,19 @@ Xato bo'lsa chiqishni yuboring — C toifasidagi testlarning o'zida xato bo'lish
 ## Maktab moduli (migratsiya 0006)
 Dars jadvali, elektron jurnal (baholar 1–5), davomat — admin sahifalari va o'quvchi ilovasidagi «Maktab» tabi.
 Tekshirilgan: SQL so'rovlari PG16'da PREPARE-ok, typecheck toza. Tekshirilmagan: brauzerda ko'rinish, integratsion test yozilmagan.
+
+## Rollar (migratsiya 0007)
+- **Administrator** — ADMIN_TELEGRAM_IDS ro'yxati; hamma narsa.
+- **O'qituvchi** — admin paneldagi «O'qituvchilar» sahifasida Telegram ID bilan qo'shiladi, botda /admin orqali kiradi. **Sinf rahbari**: o'z sinfi davomati; **fan o'qituvchisi**: o'z fanidan baho. Ikkalasi faqat biriktirilgan sinflarni ko'radi (server tomonda tekshiriladi: `middleware/auth.ts` teacherGuard + `services/staff.ts` assertClassAccess).
+- **Ota-ona** — «Ota-onalar» sahifasida yaratiladi, bir martalik kod (OT-XXXXXX) oladi, Mini App'da kodni kiritadi; farzandining baho/davomat/jadval/natijalarini ko'radi (faqat o'qish, `/api/parent/*`).
+- **O'quvchi** — avvalgidek.
+- Umumiy dashboard rolga qarab: administratorga to'liq, o'qituvchiga faqat o'z sinflari.
+Tekshirilgan: SQL PG16'da PREPARE-ok (45), migratsiya 0001–0007 toza o'tadi, ruxsat qoidalari regex bo'yicha sinalgan, typecheck yangi fayllarda toza. Tekshirilmagan: integratsion test yo'q, brauzerda ko'rinish, haqiqiy Telegram orqali ota-ona kirishi, `tests/roles.test.ts` bu muhitda `pg` yo'qligi sababli ishga tushmadi.
+
+## Ochiq bosh sahifa (migratsiya 0008)
+`/welcome` (kirmagan foydalanuvchi shu yerga tushadi): ikki qismli kirish (o'quvchi/ota-ona — Telegram bot; o'qituvchi/administrator — `/admin` buyrug'i), maktab ko'rsatkichlari, **Hafta o'quvchisi** va **Oy o'quvchisi**.
+- Ma'lumot: `GET /api/public/home` (loginsiz, 60 soniya keshlanadi). Faqat «Ism F.» + sinf + o'rtacha foiz, faqat e'lon qilingan natijalar.
+- Administrator Dashboard'dagi «Ochiq bosh sahifa» tugmasi bilan reytingni o'chira oladi.
+- «Telegram botni ochish» tugmasi uchun Railway `api` servisiga `BOT_USERNAME` (masalan `my_physics_bot`) qo'ying.
+- Admin domenida `/api/public/*` ham API'ga yo'naltirilishi kerak (deploy/Caddyfile yangilandi; Railway'da admin servisi `/api/admin/*` ni qanday yo'naltirsa, `/api/public/*` ni ham shunday).
+- Sahifada `noindex` qoldi: qidiruv tizimlari o'quvchi ismlarini indekslamaydi.

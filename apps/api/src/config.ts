@@ -26,6 +26,7 @@ const envSchema = z
       .pipe(z.array(z.coerce.number().int().positive().safe()).min(1, 'ADMIN_TELEGRAM_IDS kamida bitta ID')),
     STUDENT_APP_URL: z.string().url(),
     ADMIN_WEB_URL: z.string().url(),
+    BOT_USERNAME: z.preprocess((v) => (v === '' ? undefined : v), z.string().trim().regex(/^@?[A-Za-z0-9_]{4,32}$/).optional()),
     CORS_ORIGINS: z.string().default('').transform(csv),
     STUDENT_SESSION_TTL_HOURS: z.coerce.number().min(1).max(72).default(12),
     ADMIN_SESSION_TTL_HOURS: z.coerce.number().min(1).max(72).default(8),
@@ -64,6 +65,7 @@ export interface Config {
   adminTelegramIds: number[];
   studentAppUrl: string;
   adminWebUrl: string;
+  botUsername: string | null;
   corsOrigins: string[];
   studentSessionTtlHours: number;
   adminSessionTtlHours: number;
@@ -100,6 +102,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     adminTelegramIds: e.ADMIN_TELEGRAM_IDS,
     studentAppUrl: e.STUDENT_APP_URL.replace(/\/$/, ''),
     adminWebUrl: e.ADMIN_WEB_URL.replace(/\/$/, ''),
+    botUsername: e.BOT_USERNAME ? e.BOT_USERNAME.replace(/^@/, '') : null,
     corsOrigins: [...origins],
     studentSessionTtlHours: e.STUDENT_SESSION_TTL_HOURS,
     adminSessionTtlHours: e.ADMIN_SESSION_TTL_HOURS,

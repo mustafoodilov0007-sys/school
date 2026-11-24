@@ -9,6 +9,7 @@ import { registerSchoolStudent } from './school';
 import { ah } from '../middleware/common';
 import { revokeByToken } from '../services/sessions';
 import { loginStudent } from '../services/student-auth';
+import { linkParent, tryLoginParent } from '../services/parent-auth';
 import { AppError } from '../lib/errors';
 import { EVENT_KINDS, getStudentAnalytics, getStudentReview, listStudentResults, recordEvents, recordHeartbeat } from '../services/results';
 import { z } from 'zod';
@@ -33,8 +34,19 @@ export function studentRouter(cfg: Config, pool: Pool): Router {
       body?.dev === true && cfg.allowDevAuth && !cfg.isProd
         ? (() => { const d = parse(studentDevAuthSchema, req.body); return { dev: true, deviceId: d.deviceId, userAgent }; })()
         : (() => { const d = parse(studentTelegramAuthSchema, req.body); return { initData: d.initData, deviceId: d.deviceId, userAgent }; })();
+    if ('initData' in input) {
+      const p = await tryLoginParent(pool, cfg, { initData: input.initData, userAgent });
+      if (p) { res.json({ role: 'parent', token: p.token, expiresAt: p.expiresAt.toISOString(), parent: p.parent }); return; }
+    }
     const out = await loginStudent(pool, cfg, input);
-    res.json({ token: out.token, expiresAt: out.expiresAt.toISOString(), student: out.student });
+    res.json({ role: 'student', token: out.token, expiresAt: out.expiresAt.toISOString(), student: out.student });
+  }));
+
+  const linkLimiter = rateLimit({ windowMs: 10 * 60_000, limit: 30, standardHeaders: 'draft-7', legacyHeaders: false, message: { error: { code: 'RATE_LIMITED', message: 'Juda ko\'p urinish. Birozdan keyin qayta urinib ko\'ring' } } });
+  r.post('/auth/parent-link', linkLimiter, ah(async (req, res) => {
+    const b = parse(z.object({ initData: z.string().min(10).max(4096), code: z.string().trim().min(5).max(12) }), req.body);
+    const out = await linkParent(pool, cfg, { initData: b.initData, code: b.code, userAgent: req.get('user-agent') });
+    res.json({ role: 'parent', token: out.token, expiresAt: out.expiresAt.toISOString(), parent: out.parent });
   }));
 
   r.post('/auth/logout', requireStudent(pool), ah(async (req, res) => {

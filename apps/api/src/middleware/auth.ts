@@ -5,6 +5,7 @@ import { safeEqual } from '../lib/crypto';
 import { forbidden, unauthorized } from '../lib/errors';
 import { ah } from './common';
 import { authenticateAdmin } from '../services/admin-auth';
+import { authenticateParent } from '../services/parent-auth';
 import { authenticateStudent } from '../services/student-auth';
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -64,3 +65,32 @@ export function studentOf(req: Express.Request) {
   if (!req.student) throw unauthorized();
   return req.student;
 }
+
+export const requireParent = (pool: Pool): RequestHandler =>
+  ah(async (req, _res, next) => {
+    const m = /^Bearer ([\w-]{20,200})$/.exec(req.get('authorization') ?? '');
+    if (!m) throw unauthorized();
+    const ctx = await authenticateParent(pool, m[1] as string);
+    if (!ctx) throw unauthorized('Sessiya tugagan. Mini Appni qayta oching');
+    req.parent = ctx;
+    next();
+  });
+
+export function parentOf(req: Express.Request) {
+  if (!req.parent) throw unauthorized();
+  return req.parent;
+}
+
+/** O'qituvchi faqat quyidagi (usul, yo'l) juftliklariga kira oladi; sinf darajasidagi ruxsat servislarda tekshiriladi. */
+const TEACHER_ALLOWED: [string, RegExp][] = [
+  ['GET', /^\/(me|dashboard|classes|students)$/],
+  ['GET', /^\/(schedule|journal|attendance)\/[\w-]+$/],
+  ['POST', /^\/grades$/],
+  ['DELETE', /^\/grades\/[\w-]+$/],
+  ['PUT', /^\/attendance\/[\w-]+$/],
+];
+export const teacherGuard: RequestHandler = (req, _res, next) => {
+  if (req.admin?.me.role !== 'teacher') return next();
+  if (TEACHER_ALLOWED.some(([m, re]) => m === req.method && re.test(req.path))) return next();
+  next(forbidden('Bu bo\'lim faqat administrator uchun'));
+};

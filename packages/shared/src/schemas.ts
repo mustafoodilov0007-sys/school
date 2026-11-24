@@ -136,6 +136,7 @@ export interface AdminMeDto {
   id: string;
   telegramId: number;
   displayName: string | null;
+  role: 'admin' | 'teacher';
 }
 
 export interface AuditLogDto {
@@ -150,6 +151,15 @@ export interface AuditLogDto {
 }
 
 export interface DashboardDto {
+  role: 'admin' | 'teacher';
+  overview: {
+    teachers: number | null;
+    parents: { total: number; linked: number } | null;
+    attendanceToday: { present: number; absent: number; late: number; excused: number; marked: number; expected: number };
+    avgGrade30: number | null;
+    gradeCount30: number;
+    upcomingExams: { id: string; title: string; startsAt: string; status: string }[];
+  };
   classes: number;
   students: { total: number; active: number; linked: number; unlinked: number };
   recentAudit: AuditLogDto[];

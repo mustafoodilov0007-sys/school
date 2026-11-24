@@ -18,7 +18,9 @@ import { z } from 'zod';
 import type { Config } from '../config';
 import type { Pool } from '../db/pool';
 import { badRequest, parse } from '../lib/errors';
-import { adminOf, requireAdmin } from '../middleware/auth';
+import { adminOf, requireAdmin, teacherGuard } from '../middleware/auth';
+import { assignedClassIds, assertClassAccess, listAssignments } from '../services/staff';
+import { registerRolesAdmin } from './roles';
 import { ah } from '../middleware/common';
 import { listAudit } from '../services/audit';
 import { getMedia, saveMedia } from '../services/media';
@@ -50,13 +52,16 @@ const id = (req: Request) => parse(uuidSchema, req.params.id);
 export function adminRouter(cfg: Config, pool: Pool): Router {
   const r = Router();
   r.use(requireAdmin(cfg, pool));
+  r.use(teacherGuard);
 
-  r.get('/me', (req, res) => {
-    res.json({ admin: adminOf(req).me });
-  });
+  r.get('/me', ah(async (req, res) => {
+    const a = adminOf(req);
+    res.json({ admin: a.me, assignments: a.me.role === 'teacher' ? await listAssignments(pool, a.actor.adminId) : [] });
+  }));
 
-  r.get('/dashboard', ah(async (_req, res) => {
-    res.json(await getDashboard(pool));
+  r.get('/dashboard', ah(async (req, res) => {
+    const a = adminOf(req);
+    res.json(await getDashboard(pool, a.me.role, await assignedClassIds(pool, a)));
   }));
 
   r.get('/audit', ah(async (req, res) => {
@@ -67,7 +72,9 @@ export function adminRouter(cfg: Config, pool: Pool): Router {
   /* ── sinflar ── */
   r.get('/classes', ah(async (req, res) => {
     const q = parse(listClassesQuerySchema, req.query);
-    res.json({ items: await listClasses(pool, q.includeArchived ?? false) });
+    const mine = await assignedClassIds(pool, adminOf(req));
+    const items = await listClasses(pool, q.includeArchived ?? false);
+    res.json({ items: mine ? items.filter((c) => mine.includes(c.id)) : items });
   }));
 
   r.post('/classes', ah(async (req, res) => {
@@ -83,6 +90,10 @@ export function adminRouter(cfg: Config, pool: Pool): Router {
   /* ── o'quvchilar ── */
   r.get('/students', ah(async (req, res) => {
     const q = parse(listStudentsQuerySchema, req.query);
+    if (adminOf(req).me.role === 'teacher') {
+      if (!q.classId) throw badRequest('Sinfni tanlang');
+      await assertClassAccess(pool, adminOf(req), q.classId, { type: 'view' });
+    }
     const { items, total } = await listStudents(pool, q);
     res.json({ items, total, limit: q.limit, offset: q.offset });
   }));
@@ -301,6 +312,7 @@ export function adminRouter(cfg: Config, pool: Pool): Router {
     res.json(await broadcast(pool, adminOf(req).actor, b));
   }));
   registerSchoolAdmin(r, pool);
+  registerRolesAdmin(r, pool);
   r.get('/complaints', ah(async (req, res) => {
     const q = parse(z.object({ status: z.enum(['open', 'accepted', 'rejected']).optional() }), req.query);
     res.json({ items: await listComplaints(pool, q.status ?? null) });

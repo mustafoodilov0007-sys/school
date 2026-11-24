@@ -12,18 +12,18 @@ const DAYS = ['Dushanba', 'Seshanba', 'Chorshanba', 'Payshanba', 'Juma', 'Shanba
 const ST: Record<string, string> = { present: '✅', absent: '❌', late: '⏰', excused: '📄' };
 const color = (v: number) => (v >= 5 ? 'text-ok' : v === 4 ? 'text-brand' : v === 3 ? 'text-warn' : 'text-danger');
 
-export function SchoolPage() {
+export function SchoolPage({ endpoint = '/api/student/school', title = 'Maktab' }: { endpoint?: string; title?: string }) {
   const [d, setD] = useState<Data | null>(null);
   const [err, setErr] = useState('');
   const [n, setN] = useState(0);
-  useEffect(() => { api<Data>('/api/student/school').then(setD, () => setErr('Yuklab bo\'lmadi')); }, [n]);
+  useEffect(() => { api<Data>(endpoint).then(setD, () => setErr('Yuklab bo\'lmadi')); }, [n, endpoint]);
   if (err) return <ErrorState message={err} onRetry={() => { setErr(''); setN(n + 1); }} />;
   if (!d) return <Loading />;
   const todayIdx = (new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Tashkent' })).getDay() + 6) % 7 + 1;
   const total = d.attendance.present + d.attendance.absent + d.attendance.late + d.attendance.excused;
   return (
     <div className="space-y-4 p-4">
-      <header className="hero"><h1 className="text-2xl font-bold">Maktab</h1><small>Jadval, baholar va davomat</small></header>
+      <header className="hero"><h1 className="text-2xl font-bold">{title}</h1><small>Jadval, baholar va davomat</small></header>
 
       <section className="card space-y-2" aria-labelledby="h-gr">
         <div className="flex items-center justify-between"><h2 id="h-gr">Baholarim</h2>{d.average !== null && <span className="badge">O'rtacha: {d.average}</span>}</div>

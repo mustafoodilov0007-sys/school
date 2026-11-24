@@ -9,7 +9,7 @@ export function AuditPage() {
   if (error || !data) return <p role="alert" className="text-danger">{errMsg(error)}</p>;
   return (
     <div className="space-y-4">
-      <h2 id="h-audit">Harakatlar tarixi</h2>
+      <h1 className="text-2xl font-bold">Harakatlar tarixi</h1>
       {data.items.length === 0 ? <Empty>Hali yozuvlar yo'q</Empty> : (
         <div className="card overflow-x-auto p-0">
           <table className="w-full text-sm">

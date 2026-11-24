@@ -79,11 +79,13 @@ const needStudent = async (id, c) => { const s = await one('SELECT * FROM studen
 const routes = [];
 const r = (m, p, f) => routes.push([m, new RegExp('^' + p + '$'), f]);
 
-r('GET', '/public', async () => { const s = Object.fromEntries((await q('SELECT key,value FROM settings')).map(x => [x.key, x.value])); return { school_name: s.school_name, logo: s.logo || null, brand: s.brand || null }; });
-r('POST', '/login', async ({ b }) => {
+r('GET', '/public', async () => { const s = Object.fromEntries((await q('SELECT key,value FROM settings')).map(x => [x.key, x.value])); return { school_name: s.school_name, logo: s.logo || null, brand: s.brand || null, leaders_public: s.public_leaders === '1' }; });
+r('POST', '/login', async ({ b, ip }) => {
   if (!SECRET) bad('Server sozlanmagan', 500);
+  const fk = failKey(ip, b.login); if (locked(fk)) bad("Juda ko'p noto'g'ri urinish. 10 daqiqadan keyin qayta urinib ko'ring", 429);
   const u = await one('SELECT * FROM users WHERE login=?', [String(b.login || '')]);
-  if (!u || !u.is_active || !verify(String(b.password || ''), u.pass)) bad('Login yoki parol noto\'g\'ri', 401);
+  if (!u || !u.is_active || !verify(String(b.password || ''), u.pass)) { failed(fk); bad('Login yoki parol noto\'g\'ri', 401); }
+  FAILS.delete(fk);
   return { body: { id: u.id, name: u.name, role: u.role }, cookie: sign({ id: u.id, exp: Date.now() + 12 * 3600e3 }) };
 });
 r('POST', '/logout', async () => ({ cookie: '' }));
@@ -93,9 +95,10 @@ r('PUT', '/settings', async ({ u, b }) => {
   if (b.school_name !== undefined) { const n = String(b.school_name).trim().slice(0, 100); if (n.length < 2) bad('Maktab nomi juda qisqa'); await set('school_name', n); }
   if (b.brand !== undefined && b.brand && !/^#[0-9a-fA-F]{6}$/.test(b.brand)) bad("Rang #RRGGBB formatida bo'lsin");
   if (b.logo && (String(b.logo).length > 300000 || !/^data:image\/(png|jpeg|webp);base64,/.test(b.logo))) bad("Logo PNG/JPG/WEBP va 300 KB dan kichik bo'lsin");
+  if (b.public_leaders !== undefined) await set('public_leaders', b.public_leaders ? '1' : '0');
   if (b.brand !== undefined) await set('brand', b.brand || '');
   if (b.logo !== undefined) await set('logo', b.logo || '');
-  await audit(u, 'update', 'settings', '-', null, { keys: Object.keys(b) }); return { ok: 1 };
+  HOME = null; await audit(u, 'update', 'settings', '-', null, { keys: Object.keys(b) }); return { ok: 1 };
 });
 
 const ROLES = ['admin', 'director', 'teacher'];
@@ -430,6 +433,47 @@ r('POST', '/restore', async ({ u, b }) => {
   return { ok: 1, restored: Object.fromEntries(fill.map(t => [t, (d[t] || []).length])) };
 });
 
+// ===== Login urinishlarini cheklash (jarayon xotirasida; bir nechta nusxa bo'lsa har biri alohida hisoblaydi) =====
+const FAILS = new Map(), MAXF = 8, WIN = 10 * 60e3;
+const failKey = (ip, login) => ip + '|' + String(login || '').toLowerCase().slice(0, 40);
+const locked = k => { const f = FAILS.get(k); if (!f) return false; if (Date.now() - f.t > WIN) { FAILS.delete(k); return false; } return f.n >= MAXF; };
+const failed = k => { const f = FAILS.get(k); FAILS.set(k, f && Date.now() - f.t <= WIN ? { n: f.n + 1, t: f.t } : { n: 1, t: Date.now() }); };
+
+// ===== Hafta va oy o'quvchisi: faqat baholangan ishlarning o'rtacha foizi (baholanmagan ish hisobga olinmaydi) =====
+const TZ_TODAY = () => new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tashkent' });
+function period(unit, off) {
+  const t = new Date(TZ_TODAY() + 'T12:00:00Z'), iso = d => d.toISOString().slice(0, 10);
+  if (unit === 'week') { const st = new Date(t); st.setUTCDate(t.getUTCDate() - ((t.getUTCDay() + 6) % 7) - 7 * off); const en = new Date(st); en.setUTCDate(st.getUTCDate() + 6); return [iso(st), iso(en)]; }
+  const st = new Date(Date.UTC(t.getUTCFullYear(), t.getUTCMonth() - off, 1, 12)), en = new Date(Date.UTC(st.getUTCFullYear(), st.getUTCMonth() + 1, 0, 12)); return [iso(st), iso(en)];
+}
+const abbr = n => { const p = String(n || '').trim().split(/\s+/); return p.length > 1 ? `${p[0]} ${p[1][0]}.` : p[0] || ''; };
+async function board(unit, classIds, short) {
+  const min = unit === 'week' ? 2 : 4;
+  for (const off of [0, 1]) {
+    const [from, to] = period(unit, off), inC = classIds ? ` AND s.class_id IN (${classIds.map(Number).join(',') || 0})` : '';
+    const rows = await q(`SELECT s.name,c.name cls,ROUND(AVG(100.0*g.value/g.max),1) pct,COUNT(*) n FROM grades g JOIN students s ON s.id=g.student_id JOIN classes c ON c.id=s.class_id
+      WHERE s.status='faol' AND g.max>0 AND g.date BETWEEN ? AND ?${inC} GROUP BY s.id HAVING COUNT(*)>=? ORDER BY pct DESC,n DESC,s.name LIMIT 5`, [from, to, min]);
+    if (rows.length || off) return { label: (unit === 'week' ? (off ? "O'tgan hafta" : 'Shu hafta') : (off ? "O'tgan oy" : 'Shu oy')), from, to, min_grades: min, items: rows.map(x => ({ name: short ? abbr(x.name) : x.name, class: x.cls, percent: x.pct, grades: x.n })) };
+  }
+}
+let HOME = null;
+r('GET', '/public/home', async () => {
+  if (HOME && Date.now() - HOME.t < 60e3) return HOME.d;
+  const s = Object.fromEntries((await q('SELECT key,value FROM settings')).map(x => [x.key, x.value])), on = s.public_leaders === '1';
+  const d = {
+    school_name: s.school_name, logo: s.logo || null, brand: s.brand || null,
+    stats: { classes: (await one('SELECT COUNT(*) n FROM classes')).n, students: (await one("SELECT COUNT(*) n FROM students WHERE status='faol'")).n, teachers: (await one("SELECT COUNT(*) n FROM users WHERE role='teacher' AND is_active=1")).n },
+    leaders: on ? { week: await board('week', null, true), month: await board('month', null, true) } : null
+  };
+  HOME = { t: Date.now(), d }; return d;
+});
+// Xodimlar uchun (to'liq ism): administrator/direktor — butun maktab; o'qituvchi — faqat o'z sinflari
+r('GET', '/leaders', async ({ u }) => {
+  let ids = null;
+  if (u.role === 'teacher') ids = (await q('SELECT DISTINCT c.id FROM classes c LEFT JOIN assignments a ON a.class_id=c.id WHERE c.homeroom_id=? OR a.teacher_id=?', [u.id, u.id])).map(x => x.id);
+  return { week: await board('week', ids, false), month: await board('month', ids, false), scope: ids ? "faqat o'z sinflaringiz" : 'butun maktab' };
+});
+
 exports.handler = async ev => {
   const H = { 'content-type': 'application/json', 'cache-control': 'no-store' };
   try {
@@ -437,13 +481,14 @@ exports.handler = async ev => {
     const path = (ev.path || '').replace(/^\/(\.netlify\/functions\/api|api)/, '') || '/';
     const method = ev.httpMethod, hit = routes.find(x => x[0] === method && x[1].test(path));
     if (!hit) bad('Topilmadi', 404);
-    let u = null; const open = path === '/login' || path === '/public' || path === '/logout';
+    let u = null; const open = path === '/login' || path === '/public' || path === '/public/home' || path === '/logout';
     if (!open) {
       const ck = /(?:^|;\s*)sid=([^;]+)/.exec(ev.headers?.cookie || ''); const d = unsign(ck && ck[1]);
       u = d && await one('SELECT id,name,role FROM users WHERE id=? AND is_active=1', [d.id]); if (!u) bad('Kirish talab qilinadi', 401);
     }
     const b = ev.body ? JSON.parse(ev.body) : {};
-    const res = await hit[2]({ u, b, qs: ev.queryStringParameters || {}, m: hit[1].exec(path) });
+    const ip = String(ev.headers?.['x-forwarded-for'] || ev.headers?.['x-nf-client-connection-ip'] || '-').split(',')[0].trim();
+    const res = await hit[2]({ u, b, ip, qs: ev.queryStringParameters || {}, m: hit[1].exec(path) });
     if (res && 'cookie' in res) {
       const val = res.cookie ? `sid=${res.cookie}; Max-Age=43200` : 'sid=; Max-Age=0';
       return { statusCode: 200, headers: { ...H, 'set-cookie': `${val}; Path=/; HttpOnly; Secure; SameSite=Strict` }, body: JSON.stringify(res.body || { ok: 1 }) };

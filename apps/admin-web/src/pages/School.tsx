@@ -1,6 +1,4 @@
 import { useCallback, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ClassIndex } from '../components/ClassIndex';
 import { api, errMsg } from '../lib/api';
 import { ClassPicker } from '../components/ClassPicker';
 import { Empty, ReasonDialog, Spinner, useAsync } from '../components/ui';
@@ -15,9 +13,9 @@ const gradeColor = (v: number) => (v >= 5 ? 'text-ok' : v === 4 ? 'text-brand' :
 /* ───────── Elektron jurnal ───────── */
 interface Journal { students: { id: string; name: string }[]; grades: { id: string; studentId: string; date: string; subject: string; value: number; kind: string; topic: string | null; comment: string | null }[] }
 
-function JournalView({ classId }: { classId: string }) {
+export function JournalPage() {
   const toast = useToast();
-  const nav = useNavigate();
+  const [classId, setClassId] = useState('');
   const [to, setTo] = useState(today());
   const from = addDays(to, -29);
   const [add, setAdd] = useState<{ studentId: string; name: string } | null>(null);
@@ -26,7 +24,7 @@ function JournalView({ classId }: { classId: string }) {
   const [kind, setKind] = useState('daily');
   const [topic, setTopic] = useState('');
   const [date, setDate] = useState(today());
-  const pick = useCallback((id: string) => nav(`/journal/${id}`), [nav]);
+  const pick = useCallback((id: string) => setClassId(id), []);
   const d = useAsync(() => (classId ? api<Journal>(`/api/admin/journal/${classId}?from=${from}&to=${to}`) : Promise.resolve(null)), [classId, to]);
   const save = async () => {
     if (!add) return;
@@ -39,7 +37,6 @@ function JournalView({ classId }: { classId: string }) {
     <div className="space-y-4">
       <div className="page-title"><h1>Elektron jurnal</h1>
         <div className="flex flex-wrap gap-2">
-          <Link to="/journal" className="btn-sm">← Sinflar</Link>
           <ClassPicker value={classId} onChange={pick} />
           <input type="date" className="input w-auto" aria-label="Oxirgi sana" value={to} onChange={(e) => e.target.value && setTo(e.target.value)} />
         </div>
@@ -105,12 +102,12 @@ const ST: { id: St; label: string; cls: string }[] = [
   { id: 'late', label: 'Kechikdi', cls: 'text-warn' }, { id: 'excused', label: 'Sababli', cls: 'text-brand' },
 ];
 
-function AttendanceView({ classId }: { classId: string }) {
+export function AttendancePage() {
   const toast = useToast();
-  const nav = useNavigate();
+  const [classId, setClassId] = useState('');
   const [date, setDate] = useState(today());
   const [marks, setMarks] = useState<Record<string, St>>({});
-  const pick = useCallback((id: string) => nav(`/attendance/${id}`), [nav]);
+  const pick = useCallback((id: string) => setClassId(id), []);
   const d = useAsync(async () => {
     if (!classId) return null;
     const r = await api<{ students: { id: string; name: string; status: St | null }[] }>(`/api/admin/attendance/${classId}?date=${date}`);
@@ -128,7 +125,6 @@ function AttendanceView({ classId }: { classId: string }) {
     <div className="space-y-4">
       <div className="page-title"><h1>Davomat</h1>
         <div className="flex flex-wrap gap-2">
-          <Link to="/attendance" className="btn-sm">← Sinflar</Link>
           <ClassPicker value={classId} onChange={pick} />
           <input type="date" className="input w-auto" aria-label="Sana" value={date} onChange={(e) => e.target.value && setDate(e.target.value)} />
         </div>
@@ -159,11 +155,11 @@ function AttendanceView({ classId }: { classId: string }) {
 /* ───────── Dars jadvali ───────── */
 interface Slot { id: string; weekday: number; lessonNo: number; subject: string; room: string | null; startsAt: string | null; endsAt: string | null }
 
-function ScheduleView({ classId }: { classId: string }) {
+export function SchedulePage() {
   const toast = useToast();
-  const nav = useNavigate();
+  const [classId, setClassId] = useState('');
   const [edit, setEdit] = useState<{ weekday: number; lessonNo: number; subject: string; room: string; startsAt: string; endsAt: string; id?: string } | null>(null);
-  const pick = useCallback((id: string) => nav(`/schedule/${id}`), [nav]);
+  const pick = useCallback((id: string) => setClassId(id), []);
   const d = useAsync(() => (classId ? api<{ items: Slot[] }>(`/api/admin/schedule/${classId}`) : Promise.resolve(null)), [classId]);
   const save = async () => {
     if (!edit) return;
@@ -179,8 +175,7 @@ function ScheduleView({ classId }: { classId: string }) {
   const items = d.data?.items ?? [];
   return (
     <div className="space-y-4">
-      <div className="page-title"><h1>Dars jadvali</h1><Link to="/schedule" className="btn-sm">← Sinflar</Link>
-          <ClassPicker value={classId} onChange={pick} /></div>
+      <div className="page-title"><h1>Dars jadvali</h1><ClassPicker value={classId} onChange={pick} /></div>
       {d.loading ? <Spinner /> : d.error ? <p role="alert" className="text-danger">{errMsg(d.error)}</p> : (
         <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
           {DAYS.map((name, i) => {
@@ -225,8 +220,3 @@ function ScheduleView({ classId }: { classId: string }) {
     </div>
   );
 }
-
-/* ───────── Kirish: avval sinf tanlanadi (eMaktab tartibi), keyin sinfning jurnali/davomati/jadvali ───────── */
-export function JournalPage() { const { classId } = useParams(); return classId ? <JournalView classId={classId} /> : <ClassIndex base="/journal" title="Elektron jurnal" hint="Jurnalini ochish uchun sinfni tanlang." />; }
-export function AttendancePage() { const { classId } = useParams(); return classId ? <AttendanceView classId={classId} /> : <ClassIndex base="/attendance" title="Davomat" hint="Davomatini belgilash uchun sinfni tanlang." />; }
-export function SchedulePage() { const { classId } = useParams(); return classId ? <ScheduleView classId={classId} /> : <ClassIndex base="/schedule" title="Dars jadvali" hint="Jadvalini ko'rish va tahrirlash uchun sinfni tanlang." />; }

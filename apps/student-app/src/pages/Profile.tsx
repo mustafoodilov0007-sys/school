@@ -3,7 +3,7 @@ import { useAuth } from '../lib/auth';
 
 export function Profile() {
   const { state } = useAuth();
-  if (state.status !== 'ready') return null;
+  if (state.status !== 'ready' || state.role !== 'student') return null;
   const s = state.student;
   const rows: [string, string][] = [
     ['Ism', s.firstName],

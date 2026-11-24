@@ -16,6 +16,8 @@ import { adminAuthRouter } from './routes/admin-auth';
 import { adminRouter } from './routes/admin';
 import { internalRouter } from './routes/internal';
 import { studentRouter } from './routes/student';
+import { parentRouter } from './routes/parent';
+import { getPublicHome } from './services/public';
 
 export interface AppDeps {
   cfg: Config;
@@ -101,10 +103,15 @@ export function createApp({ cfg, pool, logger }: AppDeps): Express {
   });
   app.use('/api', limiter);
 
+  app.get('/api/public/home', ah(async (_req, res) => {
+    res.set('Cache-Control', 'public, max-age=60');
+    res.json(await getPublicHome(pool, cfg.botUsername));
+  }));
   app.use('/api/admin', csrfGuard(cfg));
   app.use('/api/admin/auth', adminAuthRouter(cfg, pool));
   app.use('/api/admin', adminRouter(cfg, pool));
   app.use('/api/student', studentRouter(cfg, pool));
+  app.use('/api/parent', parentRouter(pool));
 
   app.use(notFoundHandler);
   app.use(errorHandler(logger));
