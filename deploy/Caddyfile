@@ -1,0 +1,42 @@
+# HTTPS sertifikatlar Caddy tomonidan avtomatik olinadi (domenlar DNS orqali serverga yo'naltirilgan bo'lishi kerak).
+# /internal/* HECH QAYERDA proksilanmaydi — u faqat docker tarmog'ida bot uchun.
+
+(security) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+}
+
+{$STUDENT_DOMAIN} {
+	import security
+	# Mini App faqat Telegram ichida ochilishi uchun freymlashga ruxsat (Telegram web-klientlari uchun)
+	header Content-Security-Policy "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors https://web.telegram.org https://*.telegram.org"
+	handle /api/student/* {
+		reverse_proxy api:3000
+	}
+	handle /telegram-webhook {
+		reverse_proxy bot:3100
+	}
+	handle {
+		root * /srv/student
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+{$ADMIN_DOMAIN} {
+	import security
+	header Content-Security-Policy "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
+	@api path /api/admin/* /api/public/*
+	handle @api {
+		reverse_proxy api:3000
+	}
+	handle {
+		root * /srv/admin
+		try_files {path} /index.html
+		file_server
+	}
+}

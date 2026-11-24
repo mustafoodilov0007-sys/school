@@ -1,0 +1,67 @@
+# Lokal ishlab chiqish uchun faqat PostgreSQL:   docker compose up -d db
+# To'liq stack (production-ga yaqin):             docker compose --profile full up -d --build
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      TZ: UTC
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    profiles: ["full"]
+    build: { context: ., dockerfile: apps/api/Dockerfile }
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      TRUST_PROXY: "1"
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public
+    depends_on:
+      db: { condition: service_healthy }
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  bot:
+    profiles: ["full"]
+    build: { context: ., dockerfile: apps/bot/Dockerfile }
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      API_INTERNAL_URL: http://api:3000
+    depends_on:
+      - api
+
+  web:
+    profiles: ["full"]
+    build: { context: ., dockerfile: deploy/Dockerfile.web }
+    restart: unless-stopped
+    environment:
+      STUDENT_DOMAIN: ${STUDENT_DOMAIN}
+      ADMIN_DOMAIN: ${ADMIN_DOMAIN}
+    depends_on:
+      - api
+      - bot
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
