@@ -41,6 +41,8 @@ const init = () => ready || (ready = (async () => {
       `CREATE TABLE attendance_new(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES students(id),class_id INTEGER NOT NULL,subject_id INTEGER NOT NULL,date TEXT NOT NULL,slot INTEGER NOT NULL DEFAULT 0,status TEXT NOT NULL CHECK(status IN('keldi','kelmadi','kechikdi','uzrli')),note TEXT,UNIQUE(student_id,subject_id,date,slot))`,
       `INSERT INTO attendance_new(id,student_id,class_id,subject_id,date,slot,status,note) SELECT id,student_id,class_id,subject_id,date,0,status,note FROM attendance`,
       `DROP TABLE attendance`, `ALTER TABLE attendance_new RENAME TO attendance`, `CREATE INDEX IF NOT EXISTS ix_a ON attendance(class_id,date)`], 'write');
+  if (!(await q('PRAGMA table_info(timetable)')).some(c => c.name === 'slot')) await run('ALTER TABLE timetable ADD COLUMN slot INTEGER'); // dars raqami (1-dars, 2-dars ...): mavjud darslar vaqti bo'yicha avtomatik bog'lanadi
+  await mapSlots();
   await run(`INSERT OR IGNORE INTO settings VALUES('school_name','Deutsch School MCHJ')`);
   if (!(await one('SELECT id FROM users LIMIT 1')) && process.env.ADMIN_PASSWORD)
     await run('INSERT INTO users(login,name,pass,role,created_at) VALUES(?,?,?,?,?)', [process.env.ADMIN_LOGIN || 'admin', 'Administrator', hash(process.env.ADMIN_PASSWORD), 'admin', now()]);
@@ -66,6 +68,8 @@ const canView = async (u, c, s) => u.role !== 'teacher' || (await homeroom(u, c)
 const need = (u, ...r) => { if (!r.includes(u.role)) bad('Ruxsat yo\'q', 403); };
 const hhmm = s => /^([01]\d|2[0-3]):[0-5]\d$/.test(s || '') || bad('Vaqt formati HH:MM bo\'lishi kerak');
 
+// Vaqti qo'ng'iroq jadvalidagi darsga aynan mos keladigan, lekin raqami yo'q darslarga raqam beradi
+async function mapSlots() { await run('UPDATE timetable SET slot=(SELECT no FROM bell_slots b WHERE b.start=timetable.start AND b.end=timetable.end) WHERE slot IS NULL'); }
 async function conflict(b, skip = 0) {
   const base = 'SELECT t.*,c.name cn,u.name un FROM timetable t JOIN classes c ON c.id=t.class_id JOIN users u ON u.id=t.teacher_id WHERE t.weekday=? AND t.start<? AND t.end>? AND t.id!=?';
   for (const r of await q(base, [b.weekday, b.end, b.start, skip])) {
@@ -198,6 +202,14 @@ r('PATCH', '/students/(\\d+)', async ({ u, b, m }) => {
   await run('UPDATE students SET name=?,code=?,class_id=?,status=?,parent_contact=? WHERE id=?', [name, code, cls, status, pc, s.id]);
   await audit(u, 'update', 'student', s.id, { name: s.name, code: s.code, class_id: s.class_id, status: s.status }, { name, code, class_id: cls, status }); return { ok: 1 };
 });
+// O'quvchini butunlay o'chirish: baho va davomati ham o'chadi (tranzaksiya). Faqat admin yoki sinf rahbari; to'liq nusxa auditga yoziladi.
+r('DELETE', '/students/(\\d+)', async ({ u, m }) => {
+  const s = await one('SELECT * FROM students WHERE id=?', [+m[1]]); if (!s) bad('Topilmadi', 404);
+  if (!(await homeroom(u, s.class_id))) bad('Ruxsat yo\'q', 403);
+  const g = await q('SELECT * FROM grades WHERE student_id=?', [s.id]), a = await q('SELECT * FROM attendance WHERE student_id=?', [s.id]);
+  await db.batch([{ sql: 'DELETE FROM grades WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM attendance WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM students WHERE id=?', args: [s.id] }], 'write');
+  await audit(u, 'delete', 'student', s.id, { student: s, grades: g, attendance: a }, null); return { ok: 1, grades: g.length, attendance: a.length };
+});
 // O'quvchi individual sahifasi: o'qituvchi faqat o'z fanlarini ko'radi, sinf rahbari/admin/direktor hammasini
 r('GET', '/students/(\\d+)', async ({ u, m }) => {
   const s = await one('SELECT st.*,c.name class_name,c.year FROM students st JOIN classes c ON c.id=st.class_id WHERE st.id=?', [+m[1]]); if (!s) bad('Topilmadi', 404);
@@ -245,6 +257,8 @@ r('PUT', '/bell_slots', async ({ u, b }) => { // butun ro'yxat almashtiriladi (t
   if (L.length > 15) bad("Darslar soni 15 dan oshmasin");
   L.forEach((x, i) => { hhmm(x.start); hhmm(x.end); if (x.start >= x.end) bad(`${i + 1}-dars: tugash vaqti boshlanishdan keyin bo'lsin`); if (i && x.start < L[i - 1].end) bad(`${i + 1}-dars oldingi dars bilan kesishadi`); });
   await db.batch([{ sql: 'DELETE FROM bell_slots', args: [] }, ...L.map((x, i) => ({ sql: 'INSERT INTO bell_slots(no,start,end) VALUES(?,?,?)', args: [i + 1, x.start, x.end] }))], 'write');
+  await run('UPDATE timetable SET start=(SELECT start FROM bell_slots b WHERE b.no=timetable.slot),end=(SELECT end FROM bell_slots b WHERE b.no=timetable.slot) WHERE slot IS NOT NULL AND EXISTS(SELECT 1 FROM bell_slots b WHERE b.no=timetable.slot)');
+  await mapSlots();
   await audit(u, 'update', 'bell_slots', '-', null, { count: L.length }); return { ok: 1 };
 });
 r('GET', '/grade_types', async () => q('SELECT * FROM grade_types ORDER BY id'));
@@ -265,13 +279,26 @@ r('GET', '/timetable', async ({ u, qs }) => {
   if (qs.class_id) { w.push('t.class_id=?'); a.push(+qs.class_id); }
   if (qs.teacher_id) { w.push('t.teacher_id=?'); a.push(+qs.teacher_id); }
   if (qs.weekday) { w.push('t.weekday=?'); a.push(+qs.weekday); }
-  return q(`SELECT t.*,c.name class,s.name subject,u.name teacher FROM timetable t JOIN classes c ON c.id=class_id JOIN subjects s ON s.id=subject_id JOIN users u ON u.id=teacher_id ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY weekday,start`, a);
+  return q(`SELECT t.*,c.name class,s.name subject,u.name teacher FROM timetable t JOIN classes c ON c.id=class_id JOIN subjects s ON s.id=subject_id JOIN users u ON u.id=teacher_id ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY weekday,COALESCE(slot,99),start`, a);
 });
 const ttSave = async (u, b, id) => {
-  need(u, 'admin'); hhmm(b.start); hhmm(b.end); if (b.start >= b.end) bad('Tugash vaqti boshlanishdan keyin bo\'lishi kerak');
+  need(u, 'admin');
+  b.class_id = +b.class_id; b.subject_id = +b.subject_id; b.teacher_id = +b.teacher_id; b.weekday = +b.weekday;
+  if (!(b.weekday >= 1 && b.weekday <= 7)) bad('Hafta kuni noto\'g\'ri');
+  if (!(await one('SELECT 1 x FROM classes WHERE id=?', [b.class_id])) || !(await one('SELECT 1 x FROM subjects WHERE id=?', [b.subject_id])) || !(await one('SELECT 1 x FROM users WHERE id=? AND role=\'teacher\'', [b.teacher_id]))) bad('Sinf, fan yoki o\'qituvchi topilmadi');
+  let slot = b.slot ? +b.slot : null;
+  if (slot) { const s = await one('SELECT * FROM bell_slots WHERE no=?', [slot]); if (!s) bad(`${slot}-dars vaqti sozlanmagan (Dars jadvali → Qo'ng'iroqlar)`); b.start = s.start; b.end = s.end; }
+  hhmm(b.start); hhmm(b.end); if (b.start >= b.end) bad('Tugash vaqti boshlanishdan keyin bo\'lishi kerak');
+  if (!slot) slot = (await one('SELECT no FROM bell_slots WHERE start=? AND end=?', [b.start, b.end]) || {}).no || null;
   await conflict(b, id || 0);
-  if (id) { await run('UPDATE timetable SET class_id=?,subject_id=?,teacher_id=?,weekday=?,start=?,end=?,room=? WHERE id=?', [b.class_id, b.subject_id, b.teacher_id, b.weekday, b.start, b.end, b.room || null, id]); return { id }; }
-  const x = await run('INSERT INTO timetable(class_id,subject_id,teacher_id,weekday,start,end,room) VALUES(?,?,?,?,?,?,?)', [b.class_id, b.subject_id, b.teacher_id, b.weekday, b.start, b.end, b.room || null]); return { id: Number(x.lastInsertRowid) };
+  const room = String(b.room || '').trim().slice(0, 20) || null;
+  if (id) { await run('UPDATE timetable SET class_id=?,subject_id=?,teacher_id=?,weekday=?,start=?,end=?,room=?,slot=? WHERE id=?', [b.class_id, b.subject_id, b.teacher_id, b.weekday, b.start, b.end, room, slot, id]); await audit(u, 'update', 'timetable', id, null, { class_id: b.class_id, subject_id: b.subject_id, weekday: b.weekday, slot }); return { id }; }
+  const x = await run('INSERT INTO timetable(class_id,subject_id,teacher_id,weekday,start,end,room,slot) VALUES(?,?,?,?,?,?,?,?)', [b.class_id, b.subject_id, b.teacher_id, b.weekday, b.start, b.end, room, slot]);
+  // sinf+fan uchun o'qituvchi hali biriktirilmagan bo'lsa, jurnal ruxsati ishlashi uchun avtomatik biriktiriladi
+  const had = await one('SELECT 1 x FROM assignments WHERE class_id=? AND subject_id=?', [b.class_id, b.subject_id]);
+  if (!had) { await run('INSERT INTO assignments(class_id,subject_id,teacher_id) VALUES(?,?,?)', [b.class_id, b.subject_id, b.teacher_id]); await audit(u, 'assign', 'assignment', `${b.class_id}-${b.subject_id}`, null, { teacher_id: b.teacher_id, auto: 1 }); }
+  await audit(u, 'create', 'timetable', Number(x.lastInsertRowid), null, { class_id: b.class_id, subject_id: b.subject_id, weekday: b.weekday, slot });
+  return { id: Number(x.lastInsertRowid), assigned: !had };
 };
 r('POST', '/timetable', async ({ u, b }) => ttSave(u, b));
 r('PUT', '/timetable/(\\d+)', async ({ u, b, m }) => ttSave(u, b, +m[1]));
@@ -428,7 +455,7 @@ r('POST', '/restore', async ({ u, b }) => {
   for (const x of d.users || []) if (!have.has(x.id)) st.push({ sql: 'INSERT INTO users(id,login,name,pass,role,is_active,created_at) VALUES(?,?,?,?,?,0,?)', args: [x.id, x.login, x.name, 'x:x', x.role, x.created_at || null] });
   for (const t of wipe) st.push({ sql: `DELETE FROM ${t}`, args: [] });
   for (const t of fill) for (const row of d[t] || []) st.push(ins(t, row));
-  await db.batch(st, 'write');
+  await db.batch(st, 'write'); await mapSlots();
   await audit(u, 'restore', 'backup', '-', null, { exported_at: d.exported_at, classes: d.classes.length, students: d.students.length });
   return { ok: 1, restored: Object.fromEntries(fill.map(t => [t, (d[t] || []).length])) };
 });
