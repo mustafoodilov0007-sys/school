@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "test": "rm -f /tmp/school.db* && node test.js && node test-migration.js && rm -f /tmp/school.db* && node test-public.js && rm -f /tmp/school.db* && node test-slots.js && rm -f /tmp/school.db* && node test-students.js",
+    "test": "rm -f /tmp/school.db* && node test.js && node test-migration.js && rm -f /tmp/school.db* && node test-public.js && rm -f /tmp/school.db* && node test-slots.js && rm -f /tmp/school.db* && node test-students.js && rm -f /tmp/school.db* && node test-parents.js",
     "start": "node server.js"
   },
   "dependencies": {
