@@ -1,0 +1,11 @@
+[build]
+  publish = "public"
+  functions = "netlify/functions"
+[functions]
+  node_bundler = "esbuild"
+  external_node_modules = ["@libsql/client"]
+  included_files = ["node_modules/@libsql/**", "node_modules/libsql/**", "node_modules/@neon-rs/**"]
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200

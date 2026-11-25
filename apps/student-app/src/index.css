@@ -1,0 +1,70 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --c-bg: 244 246 250;
+  --c-card: 255 255 255;
+  --c-ink: 17 24 39;
+  --c-mute: 100 110 128;
+  --c-line: 226 230 238;
+  --c-brand: 37 99 235;
+  --c-brand-ink: 255 255 255;
+  --c-danger: 220 38 38;
+  --c-ok: 22 128 61;
+  --c-warn: 180 83 9;
+  --c-soft: 232 240 254;
+  --c-hero: 27 58 100;
+}
+:root[data-theme='dark'] {
+  --c-bg: 15 18 25;
+  --c-card: 25 30 41;
+  --c-ink: 236 240 247;
+  --c-mute: 148 158 176;
+  --c-line: 42 49 64;
+  --c-brand: 96 150 255;
+  --c-brand-ink: 10 14 22;
+  --c-danger: 248 113 113;
+  --c-ok: 74 222 128;
+  --c-warn: 251 191 36;
+  --c-soft: 30 41 66;
+  --c-hero: 30 52 92;
+}
+
+html, body, #root { height: 100%; }
+body {
+  @apply bg-bg text-ink antialiased;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+button:focus-visible, a:focus-visible, summary:focus-visible { outline: 3px solid rgb(var(--c-brand)); outline-offset: 2px; }
+
+
+.spin { animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .spin { animation: none; }
+  * { transition: none !important; scroll-behavior: auto !important; }
+}
+
+/* ---- Maktab dizayn tizimi: umumiy komponentlar ---- */
+h1 { @apply text-xl font-bold leading-tight; }
+h2 { @apply text-lg font-semibold leading-snug; }
+.card { @apply rounded-2xl border border-line bg-card p-4 shadow-card; }
+.btn { @apply inline-flex min-h-[48px] items-center justify-center gap-2 rounded-xl bg-brand px-5 font-semibold text-brand-ink transition active:scale-[0.98] disabled:opacity-50; }
+.btn-ghost { @apply inline-flex min-h-[48px] items-center justify-center gap-2 rounded-xl border border-line bg-card px-5 font-medium transition active:scale-[0.98] disabled:opacity-50; }
+.badge { @apply inline-flex items-center rounded-full bg-soft px-2.5 py-0.5 text-xs font-medium text-brand; }
+.badge-ok { @apply inline-flex items-center rounded-full border border-ok/30 px-2.5 py-0.5 text-xs font-medium text-ok; }
+.badge-warn { @apply inline-flex items-center rounded-full border border-warn/30 px-2.5 py-0.5 text-xs font-medium text-warn; }
+.badge-danger { @apply inline-flex items-center rounded-full border border-danger/30 px-2.5 py-0.5 text-xs font-medium text-danger; }
+.page-title { @apply mb-4 flex flex-wrap items-center justify-between gap-2; }
+input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid rgb(var(--c-brand)); outline-offset: 1px; }
+
+/* ---- eMaktab ilhomi: navy sarlavha, modul qatorlari, rol kartalari ---- */
+.hero { @apply rounded-2xl bg-[rgb(var(--c-hero))] px-5 py-4 text-white; }
+.hero small { @apply block text-sm opacity-80; }
+.module-row { @apply flex items-center gap-3 rounded-xl px-2 py-2.5 hover:bg-bg; }
+.module-icon { @apply flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-soft text-xl; }
+.module-title { @apply font-semibold leading-tight; }
+.module-sub { @apply text-sm text-mute; }
+.module-row .chev { @apply ml-auto text-mute; }

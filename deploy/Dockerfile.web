@@ -1,0 +1,18 @@
+# Ikkala frontendni yig'ib, Caddy ichiga joylaydi. Kontekst: repozitoriya ildizi.
+FROM node:22-alpine AS build
+WORKDIR /app
+COPY package.json package-lock.json* ./
+COPY packages/shared/package.json packages/shared/
+COPY apps/student-app/package.json apps/student-app/
+COPY apps/admin-web/package.json apps/admin-web/
+RUN if [ -f package-lock.json ]; then npm ci --workspace @pep/student-app --workspace @pep/admin-web --workspace @pep/shared --include-workspace-root; else npm install --workspace @pep/student-app --workspace @pep/admin-web --workspace @pep/shared --include-workspace-root; fi
+COPY tsconfig.base.json ./
+COPY packages/shared packages/shared
+COPY apps/student-app apps/student-app
+COPY apps/admin-web apps/admin-web
+RUN npm run build -w @pep/student-app && npm run build -w @pep/admin-web
+
+FROM caddy:2-alpine
+COPY deploy/Caddyfile /etc/caddy/Caddyfile
+COPY --from=build /app/apps/student-app/dist /srv/student
+COPY --from=build /app/apps/admin-web/dist /srv/admin
