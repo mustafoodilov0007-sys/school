@@ -18,10 +18,22 @@ const SCHEMA = [
 `CREATE TABLE IF NOT EXISTS assignments(id INTEGER PRIMARY KEY,class_id INTEGER NOT NULL REFERENCES classes(id),subject_id INTEGER NOT NULL REFERENCES subjects(id),teacher_id INTEGER NOT NULL REFERENCES users(id),UNIQUE(class_id,subject_id))`,
 `CREATE TABLE IF NOT EXISTS students(id INTEGER PRIMARY KEY,code TEXT UNIQUE,name TEXT NOT NULL,class_id INTEGER NOT NULL REFERENCES classes(id),status TEXT NOT NULL DEFAULT 'faol',parent_contact TEXT)`,
 `CREATE TABLE IF NOT EXISTS student_accounts(student_id INTEGER PRIMARY KEY,login TEXT UNIQUE NOT NULL,pass TEXT NOT NULL,is_active INTEGER NOT NULL DEFAULT 1,created_at TEXT,last_login TEXT)`,
+`CREATE TABLE IF NOT EXISTS parent_accounts(student_id INTEGER PRIMARY KEY,login TEXT UNIQUE NOT NULL,pass TEXT NOT NULL,is_active INTEGER NOT NULL DEFAULT 1,created_at TEXT,last_login TEXT)`,
+`CREATE TABLE IF NOT EXISTS admission_resets(student_id INTEGER NOT NULL,subject_id INTEGER NOT NULL,cleared_on TEXT NOT NULL,note TEXT,by_id INTEGER,PRIMARY KEY(student_id,subject_id))`,
+`CREATE TABLE IF NOT EXISTS announcements(id INTEGER PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL,audience TEXT NOT NULL DEFAULT 'all' CHECK(audience IN('all','staff','students','parents')),pinned INTEGER NOT NULL DEFAULT 0,author_id INTEGER,created_at TEXT)`,
 `CREATE TABLE IF NOT EXISTS timetable(id INTEGER PRIMARY KEY,class_id INTEGER NOT NULL REFERENCES classes(id),subject_id INTEGER NOT NULL REFERENCES subjects(id),teacher_id INTEGER NOT NULL REFERENCES users(id),weekday INTEGER NOT NULL CHECK(weekday BETWEEN 1 AND 7),start TEXT NOT NULL,end TEXT NOT NULL,room TEXT)`,
 `CREATE TABLE IF NOT EXISTS lessons(id INTEGER PRIMARY KEY,class_id INTEGER NOT NULL,subject_id INTEGER NOT NULL,teacher_id INTEGER NOT NULL,date TEXT NOT NULL,topic TEXT,homework TEXT,note TEXT,UNIQUE(class_id,subject_id,date))`,
 `CREATE TABLE IF NOT EXISTS grades(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES students(id),class_id INTEGER NOT NULL,subject_id INTEGER NOT NULL,teacher_id INTEGER NOT NULL,date TEXT NOT NULL,type TEXT NOT NULL,value REAL NOT NULL,max REAL NOT NULL DEFAULT 5,comment TEXT,UNIQUE(student_id,subject_id,date,type))`,
 `CREATE TABLE IF NOT EXISTS attendance(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES students(id),class_id INTEGER NOT NULL,subject_id INTEGER NOT NULL,date TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN('keldi','kelmadi','kechikdi','uzrli')),note TEXT,UNIQUE(student_id,subject_id,date))`,
+`CREATE TABLE IF NOT EXISTS period_grades(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES students(id),class_id INTEGER NOT NULL,subject_id INTEGER NOT NULL,kind TEXT NOT NULL CHECK(kind IN('term','year')),term_id INTEGER NOT NULL DEFAULT 0,value INTEGER NOT NULL CHECK(value BETWEEN 2 AND 5),teacher_id INTEGER,updated_at TEXT,UNIQUE(student_id,subject_id,kind,term_id))`,
+`CREATE TABLE IF NOT EXISTS access_links(student_id INTEGER NOT NULL,kind TEXT NOT NULL CHECK(kind IN('student','parent')),token_hash TEXT UNIQUE NOT NULL,created_at TEXT,last_used TEXT,PRIMARY KEY(student_id,kind))`,
+`CREATE TABLE IF NOT EXISTS fin_config(key TEXT PRIMARY KEY,value TEXT)`,
+`CREATE TABLE IF NOT EXISTS class_fee(class_id INTEGER PRIMARY KEY REFERENCES classes(id),monthly INTEGER NOT NULL DEFAULT 0)`,
+`CREATE TABLE IF NOT EXISTS fee_plans(student_id INTEGER PRIMARY KEY REFERENCES students(id),monthly INTEGER,discount_pct INTEGER NOT NULL DEFAULT 0 CHECK(discount_pct BETWEEN 0 AND 100),note TEXT)`,
+`CREATE TABLE IF NOT EXISTS charges(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES students(id),period TEXT NOT NULL,amount INTEGER NOT NULL,kind TEXT NOT NULL DEFAULT 'oylik',note TEXT,created_at TEXT)`,
+`CREATE UNIQUE INDEX IF NOT EXISTS ux_charge_month ON charges(student_id,period) WHERE kind='oylik'`,
+`CREATE TABLE IF NOT EXISTS payments(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES students(id),amount INTEGER NOT NULL CHECK(amount>0),method TEXT NOT NULL,paid_on TEXT NOT NULL,note TEXT,ext_id TEXT UNIQUE,status TEXT NOT NULL DEFAULT 'ok',created_by INTEGER,created_at TEXT)`,
+`CREATE TABLE IF NOT EXISTS gateway_tx(id INTEGER PRIMARY KEY,provider TEXT NOT NULL,ext_id TEXT NOT NULL,student_id INTEGER NOT NULL,amount INTEGER NOT NULL,state INTEGER NOT NULL,create_time INTEGER,perform_time INTEGER,cancel_time INTEGER,reason INTEGER,payment_id INTEGER,UNIQUE(provider,ext_id))`,
 `CREATE TABLE IF NOT EXISTS audit_logs(id INTEGER PRIMARY KEY,user_id INTEGER,action TEXT,entity TEXT,entity_id TEXT,old TEXT,new TEXT,at TEXT)`,
 `CREATE TABLE IF NOT EXISTS academic_years(id INTEGER PRIMARY KEY,name TEXT UNIQUE NOT NULL,start_date TEXT NOT NULL,end_date TEXT NOT NULL,is_current INTEGER NOT NULL DEFAULT 0)`,
 `CREATE TABLE IF NOT EXISTS terms(id INTEGER PRIMARY KEY,year_id INTEGER NOT NULL REFERENCES academic_years(id),name TEXT NOT NULL,start_date TEXT NOT NULL,end_date TEXT NOT NULL,UNIQUE(year_id,name))`,
@@ -84,29 +96,40 @@ const needStudent = async (id, c) => { const s = await one('SELECT * FROM studen
 const routes = [];
 const r = (m, p, f) => routes.push([m, new RegExp('^' + p + '$'), f]);
 
-r('GET', '/public', async () => { const s = Object.fromEntries((await q('SELECT key,value FROM settings')).map(x => [x.key, x.value])); return { school_name: s.school_name, logo: s.logo || null, brand: s.brand || null, leaders_public: s.public_leaders === '1' }; });
+const admFrom = s => { const n = (v, d, lo, hi) => { v = parseInt(v, 10); return v >= lo && v <= hi ? v : d; }; return { max: n(s.adm_max, 4, 1, 30), days: n(s.adm_days, 14, 7, 60), week: n(s.adm_week, 2, 1, 15) }; };
+const admCfg = async () => admFrom(Object.fromEntries((await q("SELECT key,value FROM settings WHERE key LIKE 'adm_%'")).map(x => [x.key, x.value])));
+r('GET', '/public', async () => { const s = Object.fromEntries((await q('SELECT key,value FROM settings')).map(x => [x.key, x.value])); return { school_name: s.school_name, logo: s.logo || null, brand: s.brand || null, leaders_public: s.public_leaders === '1', adm: admFrom(s) }; });
 r('POST', '/login', async ({ b, ip }) => {
   if (!SECRET) bad('Server sozlanmagan', 500);
-  const fk = failKey(ip, b.login); if (locked(fk)) bad("Juda ko'p noto'g'ri urinish. 10 daqiqadan keyin qayta urinib ko'ring", 429);
+  const fk = failKey(ip, b.login), lk = loginKey(b.login); if (locked(fk) || locked(lk, 30)) bad("Juda ko'p noto'g'ri urinish. 10 daqiqadan keyin qayta urinib ko'ring", 429);
   const lg = String(b.login || '').trim(), u = await one('SELECT * FROM users WHERE login=?', [lg]);
-  if (!u) { // o'quvchi hisobi (login xodimlar bilan umumiy nomlar maydonida)
-    const a = await one('SELECT a.*,s.name,s.status FROM student_accounts a JOIN students s ON s.id=a.student_id WHERE lower(a.login)=lower(?)', [lg]);
-    if (!a || !a.is_active || a.status !== 'faol' || !verify(String(b.password || ''), a.pass)) { failed(fk); bad('Login yoki parol noto\'g\'ri', 401); }
-    FAILS.delete(fk); await run('UPDATE student_accounts SET last_login=? WHERE student_id=?', [now(), a.student_id]);
-    return { body: { id: a.student_id, name: a.name, role: 'student' }, cookie: sign({ id: a.student_id, k: 's', pv: a.pass.slice(-12), exp: Date.now() + 12 * 3600e3 }) };
+  if (!u) { // o'quvchi yoki ota-ona hisobi (login xodimlar bilan umumiy nomlar maydonida)
+    let kind = 's', a = await one('SELECT a.*,s.name,s.status FROM student_accounts a JOIN students s ON s.id=a.student_id WHERE lower(a.login)=lower(?)', [lg]);
+    if (!a) { kind = 'p'; a = await one('SELECT a.*,s.name,s.status FROM parent_accounts a JOIN students s ON s.id=a.student_id WHERE lower(a.login)=lower(?)', [lg]); }
+    if (!a || !a.is_active || a.status !== 'faol' || !verify(String(b.password || ''), a.pass)) { failed(fk); failed(lk); bad('Login yoki parol noto\'g\'ri', 401); }
+    FAILS.delete(fk); FAILS.delete(lk); await run(`UPDATE ${kind === 'p' ? 'parent_accounts' : 'student_accounts'} SET last_login=? WHERE student_id=?`, [now(), a.student_id]);
+    return { body: { id: a.student_id, name: a.name, role: kind === 'p' ? 'parent' : 'student' }, cookie: sign({ id: a.student_id, k: kind, pv: a.pass.slice(-12), exp: Date.now() + 12 * 3600e3 }) };
   }
-  if (!u.is_active || !verify(String(b.password || ''), u.pass)) { failed(fk); bad('Login yoki parol noto\'g\'ri', 401); }
-  FAILS.delete(fk);
-  return { body: { id: u.id, name: u.name, role: u.role }, cookie: sign({ id: u.id, exp: Date.now() + 12 * 3600e3 }) };
+  if (!u.is_active || !verify(String(b.password || ''), u.pass)) { failed(fk); failed(lk); bad('Login yoki parol noto\'g\'ri', 401); }
+  FAILS.delete(fk); FAILS.delete(lk);
+  return { body: { id: u.id, name: u.name, role: u.role, fin: await isFin(u) }, cookie: sign({ id: u.id, pv: u.pass.slice(-12), exp: Date.now() + 12 * 3600e3 }) };
+});
+r('POST', '/me/password', async ({ u, b }) => {
+  if (u.role === 'student' || u.role === 'parent') bad("Ruxsat yo'q", 403);
+  const a = await one('SELECT pass FROM users WHERE id=?', [u.id]); if (!a || !verify(String(b.old || ''), a.pass)) bad("Joriy parol noto'g'ri", 400);
+  const np = String(b.new || ''); if (np.length < 8) bad("Yangi parol kamida 8 belgi bo'lsin"); if (np === b.old) bad('Yangi parol eskisidan farq qilsin');
+  const h = hash(np); await run('UPDATE users SET pass=? WHERE id=?', [h, u.id]); await audit(u, 'password', 'user', u.id, null, null);
+  return { body: { ok: 1 }, cookie: sign({ id: u.id, pv: h.slice(-12), exp: Date.now() + 12 * 3600e3 }) };
 });
 r('POST', '/logout', async () => ({ cookie: '' }));
-r('GET', '/me', async ({ u }) => u);
+r('GET', '/me', async ({ u }) => (u.role === 'student' || u.role === 'parent' ? u : { ...u, fin: await isFin(u) }));
 r('PUT', '/settings', async ({ u, b }) => {
   need(u, 'admin'); const set = (k, v) => run('INSERT INTO settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', [k, v]);
   if (b.school_name !== undefined) { const n = String(b.school_name).trim().slice(0, 100); if (n.length < 2) bad('Maktab nomi juda qisqa'); await set('school_name', n); }
   if (b.brand !== undefined && b.brand && !/^#[0-9a-fA-F]{6}$/.test(b.brand)) bad("Rang #RRGGBB formatida bo'lsin");
   if (b.logo && (String(b.logo).length > 300000 || !/^data:image\/(png|jpeg|webp);base64,/.test(b.logo))) bad("Logo PNG/JPG/WEBP va 300 KB dan kichik bo'lsin");
   if (b.public_leaders !== undefined) await set('public_leaders', b.public_leaders ? '1' : '0');
+  for (const [k, lo, hi, nm] of [['adm_max', 1, 30, "Ruxsat chegarasi"], ['adm_days', 7, 60, 'Nazorat davri'], ['adm_week', 1, 15, 'Haftalik chegara']]) if (b[k] !== undefined) { const v = parseInt(b[k], 10); if (!(v >= lo && v <= hi)) bad(`${nm} ${lo}–${hi} oralig'ida bo'lsin`); await set(k, String(v)); }
   if (b.brand !== undefined) await set('brand', b.brand || '');
   if (b.logo !== undefined) await set('logo', b.logo || '');
   HOME = null; await audit(u, 'update', 'settings', '-', null, { keys: Object.keys(b) }); return { ok: 1 };
@@ -150,7 +173,7 @@ r('POST', '/users', async ({ u, b }) => {
   if (!/^[a-z0-9._-]{3,30}$/i.test(b.login || '')) bad("Login 3–30 ta lotin harf, raqam yoki . _ - belgilaridan iborat bo'lsin");
   if (String(b.password || '').length < 8) bad("Parol kamida 8 belgi bo'lsin");
   if (!ROLES.includes(b.role)) bad("Noto'g'ri rol");
-  if (await one('SELECT 1 x FROM users WHERE login=?', [b.login]) || await one('SELECT 1 x FROM student_accounts WHERE lower(login)=lower(?)', [b.login])) bad('Bu login band', 409);
+  if (await one('SELECT 1 x FROM users WHERE login=?', [b.login]) || await one('SELECT 1 x FROM student_accounts WHERE lower(login)=lower(?)', [b.login]) || await one('SELECT 1 x FROM parent_accounts WHERE lower(login)=lower(?)', [b.login])) bad('Bu login band', 409);
   const sids = await subjIds(b.subject_ids);
   const name = [o.last_name, o.first_name, o.middle_name].filter(Boolean).join(' ');
   const x = await run(`INSERT INTO users(login,name,pass,role,created_at,experience_years,${UF.join(',')}) VALUES(?,?,?,?,?,?,${UF.map(() => '?').join(',')})`,
@@ -187,8 +210,8 @@ r('POST', '/assignments', async ({ u, b }) => { need(u, 'admin'); await run('INS
 r('GET', '/students', async ({ u, qs }) => {
   const c = +qs.class_id; if (!c) bad('class_id kerak'); if (!(await canView(u, c))) bad('Ruxsat yo\'q', 403);
   const hm = await homeroom(u, c); // login nomini faqat admin va sinf rahbari ko'radi (parol hech kimga ko'rsatilmaydi)
-  const rows = await q('SELECT s.*,a.login acc_login,a.is_active acc_active,a.last_login acc_last,a.student_id acc FROM students s LEFT JOIN student_accounts a ON a.student_id=s.id WHERE s.class_id=? ORDER BY s.status,s.name', [c]);
-  return rows.map(({ acc_login, acc_active, acc_last, acc, ...x }) => ({ ...x, has_account: acc ? 1 : 0, ...(hm && acc ? { login: acc_login, acc_active, acc_last } : {}) }));
+  const rows = await q('SELECT s.*,a.login acc_login,a.is_active acc_active,a.last_login acc_last,a.student_id acc,pa.login par_login,pa.is_active par_active,pa.student_id par,(SELECT 1 FROM access_links l WHERE l.student_id=s.id AND l.kind=\'student\') ls,(SELECT 1 FROM access_links l WHERE l.student_id=s.id AND l.kind=\'parent\') lp FROM students s LEFT JOIN student_accounts a ON a.student_id=s.id LEFT JOIN parent_accounts pa ON pa.student_id=s.id WHERE s.class_id=? ORDER BY s.status,s.name', [c]);
+  return rows.map(({ acc_login, acc_active, acc_last, acc, par_login, par_active, par, ls, lp, ...x }) => ({ ...x, has_account: acc ? 1 : 0, has_parent: par ? 1 : 0, has_link: ls ? 1 : 0, has_link_parent: lp ? 1 : 0, ...(hm && acc ? { login: acc_login, acc_active, acc_last } : {}), ...(hm && par ? { par_login, par_active } : {}) }));
 });
 r('POST', '/students', async ({ u, b }) => {
   const c = +b.class_id; if (!(await homeroom(u, c))) bad('Ruxsat yo\'q', 403);
@@ -219,7 +242,7 @@ r('DELETE', '/students/(\\d+)', async ({ u, m }) => {
   const s = await one('SELECT * FROM students WHERE id=?', [+m[1]]); if (!s) bad('Topilmadi', 404);
   if (!(await homeroom(u, s.class_id))) bad('Ruxsat yo\'q', 403);
   const g = await q('SELECT * FROM grades WHERE student_id=?', [s.id]), a = await q('SELECT * FROM attendance WHERE student_id=?', [s.id]);
-  await db.batch([{ sql: 'DELETE FROM grades WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM attendance WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM student_accounts WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM students WHERE id=?', args: [s.id] }], 'write');
+  await db.batch([{ sql: 'DELETE FROM grades WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM attendance WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM student_accounts WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM parent_accounts WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM admission_resets WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM period_grades WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM access_links WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM fee_plans WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM charges WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM gateway_tx WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM payments WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM students WHERE id=?', args: [s.id] }], 'write');
   await audit(u, 'delete', 'student', s.id, { student: s, grades: g, attendance: a }, null); return { ok: 1, grades: g.length, attendance: a.length };
 });
 // ===== O'quvchi hisoblari (login/parol): admin va sinf rahbari beradi; parol faqat yaratilganda bir marta ko'rsatiladi =====
@@ -227,20 +250,23 @@ const PWA = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const genPass = () => Array.from(crypto.randomBytes(8), x => PWA[x % PWA.length]).join('');
 const tl = x => String(x || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[ʻʼ'`’‘]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const loginBase = name => { const p = String(name).trim().split(/\s+/); const b = tl(p[0]) + (tl(p[1]) ? '.' + tl(p[1])[0] : ''); return (b.length >= 3 ? b : b + 'ucv').slice(0, 24); };
-const loginTaken = async (l, sid = 0) => !!(await one('SELECT 1 x FROM users WHERE lower(login)=lower(?)', [l])) || !!(await one('SELECT 1 x FROM student_accounts WHERE lower(login)=lower(?) AND student_id!=?', [l, sid]));
-async function freeLogin(base) { let l = base, i = 0; while (await loginTaken(l)) { i++; l = base + (i < 10 ? i : Math.floor(100 + Math.random() * 900)); } return l; }
+const ACC = { student: 'student_accounts', parent: 'parent_accounts' };
+const loginTaken = async (l, sid = 0, kind = 'student') => !!(await one('SELECT 1 x FROM users WHERE lower(login)=lower(?)', [l])) ||
+  !!(await one('SELECT 1 x FROM student_accounts WHERE lower(login)=lower(?) AND NOT(?=\'student\' AND student_id=?)', [l, kind, sid])) || !!(await one('SELECT 1 x FROM parent_accounts WHERE lower(login)=lower(?) AND NOT(?=\'parent\' AND student_id=?)', [l, kind, sid]));
+async function freeLogin(base) { let l = base, i = 0; while (await loginTaken(l, 0, 'none')) { i++; l = base + (i < 10 ? i : Math.floor(100 + Math.random() * 900)); } return l; }
 async function stuManage(u, id) { const s = await one('SELECT * FROM students WHERE id=?', [id]); if (!s) bad('Topilmadi', 404); if (!(await homeroom(u, s.class_id))) bad('Ruxsat yo\'q', 403); return s; }
-async function issueAccount(u, s, b) {
-  const ex = await one('SELECT * FROM student_accounts WHERE student_id=?', [s.id]); let login = ex ? ex.login : null; const want = String(b.login || '').trim().toLowerCase();
+const parBase = name => ('ota.' + tl(String(name).trim().split(/\s+/)[0])).slice(0, 24);
+async function issueAccount(u, s, b, kind = 'student') {
+  const T = ACC[kind], ex = await one(`SELECT * FROM ${T} WHERE student_id=?`, [s.id]); let login = ex ? ex.login : null; const want = String(b.login || '').trim().toLowerCase();
   if (want && (!ex || want !== ex.login)) {
     if (!/^[a-z0-9._-]{3,30}$/.test(want)) bad("Login 3–30 ta lotin harf, raqam yoki . _ - belgilaridan iborat bo'lsin");
-    if (await loginTaken(want, s.id)) bad('Bu login band', 409); login = want;
+    if (await loginTaken(want, s.id, kind)) bad('Bu login band', 409); login = want;
   }
-  if (!login) login = await freeLogin(loginBase(s.name));
+  if (!login) login = await freeLogin(kind === 'parent' ? parBase(s.name) : loginBase(s.name));
   let pw = String(b.password || ''); if (pw) { if (pw.length < 8) bad("Parol kamida 8 belgi bo'lsin"); } else pw = genPass();
-  if (ex) await run('UPDATE student_accounts SET login=?,pass=?,is_active=1 WHERE student_id=?', [login, hash(pw), s.id]);
-  else await run('INSERT INTO student_accounts(student_id,login,pass,created_at) VALUES(?,?,?,?)', [s.id, login, hash(pw), now()]);
-  await audit(u, ex ? 'reset' : 'create', 'student_account', s.id, null, { login }); // parol auditga yozilmaydi
+  if (ex) await run(`UPDATE ${T} SET login=?,pass=?,is_active=1 WHERE student_id=?`, [login, hash(pw), s.id]);
+  else await run(`INSERT INTO ${T}(student_id,login,pass,created_at) VALUES(?,?,?,?)`, [s.id, login, hash(pw), now()]);
+  await audit(u, ex ? 'reset' : 'create', kind + '_account', s.id, null, { login }); // parol auditga yozilmaydi
   return { id: s.id, name: s.name, login, password: pw, reset: !!ex };
 }
 r('POST', '/students/(\\d+)/account', async ({ u, b, m }) => { const s = await stuManage(u, +m[1]); if (s.status !== 'faol') bad("Arxivdagi o'quvchiga login berilmaydi"); return issueAccount(u, s, b); });
@@ -248,6 +274,35 @@ r('PATCH', '/students/(\\d+)/account', async ({ u, b, m }) => { const s = await 
   await run('UPDATE student_accounts SET is_active=? WHERE student_id=?', [b.is_active ? 1 : 0, s.id]); await audit(u, b.is_active ? 'enable' : 'disable', 'student_account', s.id, null, null); return { ok: 1 }; });
 r('DELETE', '/students/(\\d+)/account', async ({ u, m }) => { const s = await stuManage(u, +m[1]); await run('DELETE FROM student_accounts WHERE student_id=?', [s.id]); await audit(u, 'delete', 'student_account', s.id, null, null); return { ok: 1 }; });
 // butun sinfga: faol, hisobi yo'q o'quvchilarga login va parol yaratadi (varaqani chop etish uchun ro'yxat qaytaradi)
+
+// ===== Shaxsiy kirish havolasi (maxfiy token): login-parolsiz bir bosishda kabinetga kiradi =====
+// Token bazada faqat xesh ko'rinishida saqlanadi, shuning uchun u faqat yaratilgan paytda ko'rsatiladi. Yangilansa eskisi ishlamaydi.
+const tokHash = t => crypto.createHash('sha256').update(String(t)).digest('hex');
+async function makeLink(u, s, kind) {
+  const T = ACC[kind];
+  if (!(await one(`SELECT 1 x FROM ${T} WHERE student_id=?`, [s.id]))) await issueAccount(u, s, {}, kind); // hisob bo'lmasa yashirin tasodifiy parol bilan ochiladi (keyin xohlasangiz login-parol bering)
+  const token = crypto.randomBytes(24).toString('base64url');
+  await run('INSERT INTO access_links(student_id,kind,token_hash,created_at) VALUES(?,?,?,?) ON CONFLICT(student_id,kind) DO UPDATE SET token_hash=excluded.token_hash,created_at=excluded.created_at,last_used=NULL', [s.id, kind, tokHash(token), now()]);
+  await audit(u, 'link', kind + '_link', s.id, null, null); return { id: s.id, name: s.name, token };
+}
+const linkKind = k => (k === 'parent' ? 'parent' : 'student');
+r('POST', '/students/(\\d+)/link', async ({ u, b, m }) => { const s = await stuManage(u, +m[1]); if (s.status !== 'faol') bad("Arxivdagi o'quvchiga havola berilmaydi"); return makeLink(u, s, linkKind(b.kind)); });
+r('DELETE', '/students/(\\d+)/link', async ({ u, qs, m }) => { const s = await stuManage(u, +m[1]); await run('DELETE FROM access_links WHERE student_id=? AND kind=?', [s.id, linkKind(qs.kind)]); await audit(u, 'revoke', 'link', s.id, null, null); return { ok: 1 }; });
+r('POST', '/classes/(\\d+)/links', async ({ u, b, m }) => {
+  const c = +m[1]; if (!(await homeroom(u, c))) bad("Ruxsat yo'q", 403); const kind = linkKind(b.kind);
+  const L = await q(`SELECT s.* FROM students s WHERE s.class_id=? AND s.status='faol'${b.regen ? '' : ' AND NOT EXISTS(SELECT 1 FROM access_links l WHERE l.student_id=s.id AND l.kind=?)'} ORDER BY s.name`, b.regen ? [c] : [c, kind]);
+  const links = []; for (const s of L) links.push(await makeLink(u, s, kind)); return { links, skipped: (await one("SELECT COUNT(*) n FROM students WHERE class_id=? AND status='faol'", [c])).n - links.length };
+});
+r('POST', '/link-login', async ({ b, ip }) => {
+  if (!SECRET) bad('Server sozlanmagan', 500);
+  const fk = 'K|' + ip; if (locked(fk)) bad("Juda ko'p noto'g'ri urinish. Keyinroq urinib ko'ring", 429);
+  const t = String(b.token || ''); const l = /^[A-Za-z0-9_-]{20,64}$/.test(t) ? await one('SELECT * FROM access_links WHERE token_hash=?', [tokHash(t)]) : null;
+  const par = l && l.kind === 'parent', a = l && await one(`SELECT s.id,s.name,a.pass FROM students s JOIN ${par ? 'parent_accounts' : 'student_accounts'} a ON a.student_id=s.id WHERE s.id=? AND a.is_active=1 AND s.status='faol'`, [l.student_id]);
+  if (!a) { failed(fk); bad("Havola yaroqsiz yoki bekor qilingan. Sinf rahbaringizdan yangisini so'rang", 401); }
+  FAILS.delete(fk); await run('UPDATE access_links SET last_used=? WHERE student_id=? AND kind=?', [now(), l.student_id, l.kind]);
+  await run(`UPDATE ${par ? 'parent_accounts' : 'student_accounts'} SET last_login=? WHERE student_id=?`, [now(), a.id]);
+  return { body: { id: a.id, name: a.name, role: par ? 'parent' : 'student' }, cookie: sign({ id: a.id, k: par ? 'p' : 's', pv: a.pass.slice(-12), exp: Date.now() + 12 * 3600e3 }) };
+});
 r('POST', '/classes/(\\d+)/accounts', async ({ u, m }) => {
   const c = +m[1]; if (!(await homeroom(u, c))) bad('Ruxsat yo\'q', 403);
   const L = await q("SELECT s.* FROM students s WHERE s.class_id=? AND s.status='faol' AND NOT EXISTS(SELECT 1 FROM student_accounts a WHERE a.student_id=s.id) ORDER BY s.name", [c]);
@@ -255,14 +310,62 @@ r('POST', '/classes/(\\d+)/accounts', async ({ u, m }) => {
   const have = (await one("SELECT COUNT(*) n FROM students s JOIN student_accounts a ON a.student_id=s.id WHERE s.class_id=? AND s.status='faol'", [c])).n - created.length;
   return { created, already: have };
 });
+r('POST', '/students/(\\d+)/parent', async ({ u, b, m }) => { const s = await stuManage(u, +m[1]); if (s.status !== 'faol') bad("Arxivdagi o'quvchining ota-onasiga login berilmaydi"); return issueAccount(u, s, b, 'parent'); });
+r('PATCH', '/students/(\\d+)/parent', async ({ u, b, m }) => { const s = await stuManage(u, +m[1]); if (!(await one('SELECT 1 x FROM parent_accounts WHERE student_id=?', [s.id]))) bad('Hisob yo\'q', 404);
+  await run('UPDATE parent_accounts SET is_active=? WHERE student_id=?', [b.is_active ? 1 : 0, s.id]); await audit(u, b.is_active ? 'enable' : 'disable', 'parent_account', s.id, null, null); return { ok: 1 }; });
+r('DELETE', '/students/(\\d+)/parent', async ({ u, m }) => { const s = await stuManage(u, +m[1]); await run('DELETE FROM parent_accounts WHERE student_id=?', [s.id]); await audit(u, 'delete', 'parent_account', s.id, null, null); return { ok: 1 }; });
+r('POST', '/classes/(\\d+)/parents', async ({ u, m }) => {
+  const c = +m[1]; if (!(await homeroom(u, c))) bad('Ruxsat yo\'q', 403);
+  const L = await q("SELECT s.* FROM students s WHERE s.class_id=? AND s.status='faol' AND NOT EXISTS(SELECT 1 FROM parent_accounts a WHERE a.student_id=s.id) ORDER BY s.name", [c]);
+  const created = []; for (const s of L) created.push(await issueAccount(u, s, {}, 'parent'));
+  const have = (await one("SELECT COUNT(*) n FROM students s JOIN parent_accounts a ON a.student_id=s.id WHERE s.class_id=? AND s.status='faol'", [c])).n - created.length;
+  return { created, already: have };
+});
+// ===== E'lonlar: admin/direktor yozadi, auditoriya bo'yicha ko'rinadi =====
+const AUD = { admin: ['all', 'staff', 'students', 'parents'], director: ['all', 'staff', 'students', 'parents'], teacher: ['all', 'staff'], student: ['all', 'students'], parent: ['all', 'parents'] };
+const newsFor = async u => { const a = AUD[u.role] || ['all']; return q(`SELECT n.id,n.title,n.body,n.audience,n.pinned,n.created_at,(SELECT name FROM users WHERE id=n.author_id) author FROM announcements n WHERE n.audience IN(${a.map(() => '?').join(',')}) ORDER BY n.pinned DESC,n.id DESC LIMIT 100`, a); };
+r('GET', '/announcements', async ({ u }) => newsFor(u));
+r('GET', '/student/news', async ({ u }) => { needS(u); return newsFor(u); });
+const newsIn = b => { const t = String(b.title || '').trim(), body = String(b.body || '').trim(), aud = b.audience || 'all'; if (!t || t.length > 150) bad("Sarlavha 1–150 belgi bo'lsin"); if (!body || body.length > 4000) bad("Matn 1–4000 belgi bo'lsin"); if (!AUD.admin.includes(aud)) bad("Noto'g'ri auditoriya"); return [t, body, aud, b.pinned ? 1 : 0]; };
+r('POST', '/announcements', async ({ u, b }) => { need(u, 'admin', 'director'); const v = newsIn(b); const x = await run('INSERT INTO announcements(title,body,audience,pinned,author_id,created_at) VALUES(?,?,?,?,?,?)', [...v, u.id, now()]); await audit(u, 'create', 'announcement', Number(x.lastInsertRowid), null, { title: v[0] }); return { id: Number(x.lastInsertRowid) }; });
+r('PUT', '/announcements/(\\d+)', async ({ u, b, m }) => { need(u, 'admin', 'director'); if (!(await one('SELECT 1 x FROM announcements WHERE id=?', [+m[1]]))) bad('Topilmadi', 404); await run('UPDATE announcements SET title=?,body=?,audience=?,pinned=? WHERE id=?', [...newsIn(b), +m[1]]); await audit(u, 'update', 'announcement', +m[1], null, null); return { ok: 1 }; });
+r('DELETE', '/announcements/(\\d+)', async ({ u, m }) => { need(u, 'admin', 'director'); await run('DELETE FROM announcements WHERE id=?', [+m[1]]); await audit(u, 'delete', 'announcement', +m[1], null, null); return { ok: 1 }; });
+// ===== Nazorat imtihoniga ruxsat: so'nggi N kunda uzrsiz ('kelmadi') darslar soni chegaradan oshsa ruxsat yo'q =====
+const addDays = (d, n) => new Date(new Date(d + 'T12:00:00Z').getTime() + n * 864e5).toISOString().slice(0, 10);
+async function admission(where = '', args = []) {
+  const cfg = await admCfg(), t = tashkentToday(), from = addDays(t, -cfg.days), wk = addDays(t, -7);
+  const rows = await q(`SELECT a.student_id,a.subject_id,sb.name subject,st.name student,st.class_id,c.name class,a.date,l.topic FROM attendance a
+    JOIN students st ON st.id=a.student_id AND st.status='faol' JOIN subjects sb ON sb.id=a.subject_id JOIN classes c ON c.id=st.class_id
+    LEFT JOIN lessons l ON l.class_id=a.class_id AND l.subject_id=a.subject_id AND l.date=a.date
+    LEFT JOIN admission_resets r ON r.student_id=a.student_id AND r.subject_id=a.subject_id
+    WHERE a.status='kelmadi' AND a.date>? AND a.date<=? AND (r.cleared_on IS NULL OR a.date>r.cleared_on) ${where} ORDER BY a.date`, [from, t, ...args]);
+  const G = new Map();
+  for (const x of rows) { const k = x.student_id + ':' + x.subject_id; let g = G.get(k); if (!g) G.set(k, g = { student_id: x.student_id, student: x.student, class_id: x.class_id, class: x.class, subject_id: x.subject_id, subject: x.subject, absences: 0, week: 0, missed: [] }); g.absences++; if (x.date > wk) g.week++; g.missed.push({ date: x.date, topic: x.topic || '' }); }
+  const items = [...G.values()].map(g => ({ ...g, blocked: g.absences >= cfg.max, warn: g.absences < cfg.max && (g.week >= cfg.week || g.absences >= cfg.max - 1) })).filter(g => g.blocked || g.warn)
+    .sort((a, b) => b.blocked - a.blocked || b.absences - a.absences || a.class.localeCompare(b.class) || a.student.localeCompare(b.student));
+  return { cfg, items };
+}
+r('GET', '/admission', async ({ u, qs }) => {
+  need(u, 'admin', 'director', 'teacher'); const c = +qs.class_id || 0;
+  if (c && !(await canView(u, c))) bad("Ruxsat yo'q", 403);
+  const R = await admission(c ? 'AND st.class_id=?' : '', c ? [c] : []);
+  if (u.role === 'teacher') { const ok = new Map(), keep = []; for (const g of R.items) { const k = g.class_id + ':' + g.subject_id; if (!ok.has(k)) ok.set(k, (await homeroom(u, g.class_id)) || (await teaches(u, g.class_id, g.subject_id))); if (ok.get(k)) keep.push(g); } R.items = keep; }
+  return R;
+});
+r('POST', '/admission/clear', async ({ u, b }) => { // mavzu qayta topshirildi (otrabotka): hisob shu kundan qayta boshlanadi
+  need(u, 'admin', 'teacher'); const st = await one('SELECT * FROM students WHERE id=?', [+b.student_id]), sid = +b.subject_id;
+  if (!st || !sid) bad('Topilmadi', 404); if (!(await teaches(u, st.class_id, sid)) && !(await homeroom(u, st.class_id))) bad("Ruxsat yo'q", 403);
+  await run('INSERT INTO admission_resets(student_id,subject_id,cleared_on,note,by_id) VALUES(?,?,?,?,?) ON CONFLICT(student_id,subject_id) DO UPDATE SET cleared_on=excluded.cleared_on,note=excluded.note,by_id=excluded.by_id', [st.id, sid, tashkentToday(), String(b.note || '').slice(0, 200), u.id]);
+  await audit(u, 'admission_clear', 'student', st.id, null, { subject_id: sid }); return { ok: 1 };
+});
 // ===== O'quvchi kabineti (faqat o'z ma'lumotlari, faqat o'qish) =====
-const needS = u => { if (u.role !== 'student') bad('Ruxsat yo\'q', 403); };
+const needS = u => { if (u.role !== 'student' && u.role !== 'parent') bad('Ruxsat yo\'q', 403); };
 r('GET', '/student/overview', async ({ u }) => {
   needS(u);
   const s = await one('SELECT st.id,st.name,st.code,c.id class_id,c.name class_name,c.year,(SELECT name FROM users WHERE id=c.homeroom_id) homeroom FROM students st JOIN classes c ON c.id=st.class_id WHERE st.id=?', [u.id]);
   const since = new Date(Date.now() - 21 * 864e5).toISOString().slice(0, 10);
   return {
-    student: s,
+    student: s, role: u.role, finals: await q('SELECT p.kind,p.term_id,p.value,sb.name subject,t.name term FROM period_grades p JOIN subjects sb ON sb.id=p.subject_id LEFT JOIN terms t ON t.id=p.term_id WHERE p.student_id=? ORDER BY sb.name', [u.id]), admission: await admission('AND a.student_id=?', [u.id]),
     grades: await q('SELECT x.date,x.type,x.value,x.max,x.comment,x.subject_id,sb.name subject FROM grades x JOIN subjects sb ON sb.id=x.subject_id WHERE x.student_id=? ORDER BY x.date DESC,x.id DESC LIMIT 600', [u.id]),
     attendance: await q('SELECT x.date,x.status,x.note,sb.name subject FROM attendance x JOIN subjects sb ON sb.id=x.subject_id WHERE x.student_id=? ORDER BY x.date DESC LIMIT 600', [u.id]),
     timetable: await q('SELECT t.id,t.class_id,t.subject_id,t.weekday,t.start,t.end,t.room,t.slot,c.name class,sb.name subject,us.name teacher FROM timetable t JOIN classes c ON c.id=t.class_id JOIN subjects sb ON sb.id=t.subject_id JOIN users us ON us.id=t.teacher_id WHERE t.class_id=? ORDER BY t.weekday,COALESCE(t.slot,99),t.start', [s.class_id]),
@@ -271,11 +374,11 @@ r('GET', '/student/overview', async ({ u }) => {
   };
 });
 r('POST', '/student/password', async ({ u, b }) => {
-  needS(u); const a = await one('SELECT * FROM student_accounts WHERE student_id=?', [u.id]);
+  needS(u); const kind = u.role === 'parent' ? 'parent' : 'student', T = ACC[kind], a = await one(`SELECT * FROM ${T} WHERE student_id=?`, [u.id]);
   if (!a || !verify(String(b.old || ''), a.pass)) bad('Joriy parol noto\'g\'ri', 400);
   const np = String(b.new || ''); if (np.length < 8) bad("Yangi parol kamida 8 belgi bo'lsin"); if (np === b.old) bad('Yangi parol eskisidan farq qilsin');
-  const h = hash(np); await run('UPDATE student_accounts SET pass=? WHERE student_id=?', [h, u.id]); await audit(u, 'password', 'student_account', u.id, null, null);
-  return { body: { ok: 1 }, cookie: sign({ id: u.id, k: 's', pv: h.slice(-12), exp: Date.now() + 12 * 3600e3 }) };
+  const h = hash(np); await run(`UPDATE ${T} SET pass=? WHERE student_id=?`, [h, u.id]); await audit(u, 'password', kind + '_account', u.id, null, null);
+  return { body: { ok: 1 }, cookie: sign({ id: u.id, k: kind[0], pv: h.slice(-12), exp: Date.now() + 12 * 3600e3 }) };
 });
 // O'quvchi individual sahifasi: o'qituvchi faqat o'z fanlarini ko'radi, sinf rahbari/admin/direktor hammasini
 r('GET', '/students/(\\d+)', async ({ u, m }) => {
@@ -380,7 +483,9 @@ r('GET', '/journal', async ({ u, qs }) => {
     students: await q("SELECT id,name,code FROM students WHERE class_id=? AND status='faol' ORDER BY name", [c]),
     grades: await q('SELECT student_id,date,type,value,max,comment FROM grades WHERE class_id=? AND subject_id=?', p),
     attendance: await q('SELECT student_id,date,slot,status,note FROM attendance WHERE class_id=? AND subject_id=?', p),
-    lessons: await q('SELECT date,topic,homework,note FROM lessons WHERE class_id=? AND subject_id=? ORDER BY date DESC LIMIT 30', p)
+    lessons: await q('SELECT date,topic,homework,note FROM lessons WHERE class_id=? AND subject_id=? ORDER BY date DESC LIMIT 500', p),
+    schedule: await q('SELECT DISTINCT weekday,COALESCE(slot,0) slot FROM timetable WHERE class_id=? AND subject_id=? ORDER BY weekday,slot', p), // jurnal ustunlari dars jadvaliga mos
+    terms: await q('SELECT t.name,t.start_date,t.end_date,y.name year,y.is_current FROM terms t JOIN academic_years y ON y.id=t.year_id ORDER BY t.start_date')
   };
 });
 const dateOk = d => /^\d{4}-\d{2}-\d{2}$/.test(d || '') || bad('Sana formati YYYY-MM-DD');
@@ -456,6 +561,249 @@ r('GET', '/reports/journal_fill', async ({ u, qs }) => { // o'qituvchi jadvalida
   }
   return { from: qs.from, to: qs.to, rows: Object.values(by).map(g => ({ ...g, percent: g.planned ? Math.round(g.filled * 100 / g.planned) : null })).sort((a, b) => a.teacher.localeCompare(b.teacher)) };
 });
+
+// ===== Chorak va yillik baholar =====
+// Avtomatik: chorak ichidagi baholarning vaznli o'rtachasi (5 ballik shkalaga keltiriladi), eng yaqin butun songa (2–5). Yakuniy bahoni o'qituvchi tasdiqlaydi/tuzatadi.
+const round5 = a => a == null ? null : Math.min(5, Math.max(2, Math.round(a + 1e-9)));
+async function classYear(c) { const cl = await one('SELECT year FROM classes WHERE id=?', [c]); if (!cl) bad('Sinf topilmadi', 404); return (await one('SELECT * FROM academic_years WHERE name=?', [cl.year])) || (await one('SELECT * FROM academic_years WHERE is_current=1')); }
+async function pgData(c, s) {
+  const y = await classYear(c), terms = y ? await q('SELECT id,name,start_date,end_date FROM terms WHERE year_id=? ORDER BY start_date', [y.id]) : [];
+  const sts = await q("SELECT id,name FROM students WHERE class_id=? AND status='faol' ORDER BY name", [c]);
+  const gr = await q('SELECT g.student_id,g.date,g.value,g.max,COALESCE(t.weight,1) w FROM grades g LEFT JOIN grade_types t ON t.name=g.type WHERE g.class_id=? AND g.subject_id=? AND g.max>0', [c, s]);
+  const fin = await q('SELECT student_id,kind,term_id,value FROM period_grades WHERE class_id=? AND subject_id=?', [c, s]);
+  const rows = sts.map(st => {
+    const mine = gr.filter(g => g.student_id == st.id), tm = {}, tv = [];
+    for (const t of terms) {
+      const x = mine.filter(g => g.date >= t.start_date && g.date <= t.end_date), w = x.reduce((a, g) => a + g.w, 0), avg = w ? x.reduce((a, g) => a + g.w * 5 * g.value / g.max, 0) / w : null;
+      const f = fin.find(z => z.student_id == st.id && z.kind === 'term' && z.term_id == t.id);
+      tm[t.id] = { avg: avg == null ? null : +avg.toFixed(2), n: x.length, auto: round5(avg), value: f ? f.value : null };
+      const use = f ? f.value : round5(avg); if (use != null) tv.push(use);
+    }
+    const yf = fin.find(z => z.student_id == st.id && z.kind === 'year');
+    return { id: st.id, name: st.name, terms: tm, year: { auto: tv.length ? round5(tv.reduce((a, b) => a + b, 0) / tv.length) : null, value: yf ? yf.value : null } };
+  });
+  return { year: y ? { id: y.id, name: y.name } : null, terms, students: rows };
+}
+r('GET', '/period_grades', async ({ u, qs }) => {
+  const c = +qs.class_id, s = +qs.subject_id; if (!c || !s) bad('class_id va subject_id kerak'); if (!(await canView(u, c, s))) bad("Ruxsat yo'q", 403);
+  return { can_edit: await teaches(u, c, s), ...(await pgData(c, s)) };
+});
+const pgCheck = async (u, b) => {
+  const c = +b.class_id, s = +b.subject_id, kind = b.kind; if (!(await teaches(u, c, s))) bad("Bu sinf/fan uchun ruxsatingiz yo'q", 403);
+  if (kind !== 'term' && kind !== 'year') bad("Turi noto'g'ri"); const y = await classYear(c); if (!y) bad("O'quv yili kiritilmagan (Sozlamalar)");
+  let tid = 0; if (kind === 'term') { tid = +b.term_id; if (!(await one('SELECT 1 x FROM terms WHERE id=? AND year_id=?', [tid, y.id]))) bad("Chorak bu o'quv yiliga tegishli emas"); }
+  return { c, s, kind, tid };
+};
+r('PUT', '/period_grades', async ({ u, b }) => {
+  const { c, s, kind, tid } = await pgCheck(u, b); await needStudent(b.student_id, c);
+  const old = await one('SELECT * FROM period_grades WHERE student_id=? AND subject_id=? AND kind=? AND term_id=?', [b.student_id, s, kind, tid]);
+  if (b.value === null || b.value === '' || b.value === undefined) { if (old) { await run('DELETE FROM period_grades WHERE id=?', [old.id]); await audit(u, 'delete', 'period_grade', old.id, old, null); } return { ok: 1 }; }
+  const v = +b.value; if (!Number.isInteger(v) || v < 2 || v > 5) bad("Baho 2 dan 5 gacha butun son bo'lsin");
+  await run('INSERT INTO period_grades(student_id,class_id,subject_id,kind,term_id,value,teacher_id,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(student_id,subject_id,kind,term_id) DO UPDATE SET value=excluded.value,teacher_id=excluded.teacher_id,updated_at=excluded.updated_at', [b.student_id, c, s, kind, tid, v, u.id, now()]);
+  await audit(u, old ? 'update' : 'create', 'period_grade', `${b.student_id}-${s}-${kind}-${tid}`, old && { value: old.value }, { value: v }); return { ok: 1 };
+});
+r('POST', '/period_grades/fill', async ({ u, b }) => {
+  const { c, s, kind, tid } = await pgCheck(u, b), d = await pgData(c, s); let n = 0; const st = [];
+  for (const x of d.students) {
+    const cur = kind === 'year' ? x.year.value : x.terms[tid].value, auto = kind === 'year' ? x.year.auto : x.terms[tid].auto;
+    if (auto == null || (cur != null && !b.overwrite)) continue;
+    st.push({ sql: 'INSERT INTO period_grades(student_id,class_id,subject_id,kind,term_id,value,teacher_id,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(student_id,subject_id,kind,term_id) DO UPDATE SET value=excluded.value,teacher_id=excluded.teacher_id,updated_at=excluded.updated_at', args: [x.id, c, s, kind, tid, auto, u.id, now()] }); n++;
+  }
+  if (st.length) await db.batch(st, 'write'); await audit(u, 'fill', 'period_grade', `${c}-${s}-${kind}-${tid}`, null, { filled: n }); return { filled: n };
+});
+// Qaydnoma: o'quvchi × fan. Faqat o'qituvchi tasdiqlagan yakuniy baholar ko'rsatiladi
+r('GET', '/reports/qaydnoma', async ({ u, qs }) => {
+  const c = +qs.class_id; if (!c) bad('class_id kerak'); if (!(await canView(u, c))) bad("Ruxsat yo'q", 403);
+  const hm = await homeroom(u, c), all = u.role !== 'teacher' || hm;
+  const subs = await q(`SELECT DISTINCT sb.id,sb.name FROM assignments a JOIN subjects sb ON sb.id=a.subject_id WHERE a.class_id=?${all ? '' : ' AND a.teacher_id=' + (+u.id)} ORDER BY sb.name`, [c]);
+  const out = []; let meta = null;
+  for (const sb of subs) { const d = await pgData(c, sb.id); meta = meta || { year: d.year, terms: d.terms }; out.push({ subject: sb, students: d.students }); }
+  const y = meta || { year: await classYear(c), terms: [] }, sts = await q("SELECT id,name FROM students WHERE class_id=? AND status='faol' ORDER BY name", [c]);
+  return { year: y.year, terms: y.terms, subjects: subs, students: sts.map(st => ({ id: st.id, name: st.name, cells: Object.fromEntries(out.map(o => { const x = o.students.find(z => z.id === st.id); return [o.subject.id, { terms: Object.fromEntries(Object.entries(x.terms).map(([k, v]) => [k, v.value])), year: x.year.value }]; })) })) };
+});
+// ===== To'lovlar: tarif, oylik hisoblash, to'lov, qoldiq, buxgalteriya hisoboti, Click/Payme =====
+// Summalar so'mda butun son. qoldiq = hisoblangan − to'langan (musbat = qarz, manfiy = oldindan to'langan).
+const PMETH = ['naqd', 'bank', 'plastik', 'boshqa'], MONTH = /^\d{4}-(0[1-9]|1[0-2])$/, DATE = /^\d{4}-\d{2}-\d{2}$/;
+const finCfg = async () => Object.fromEntries((await q('SELECT key,value FROM fin_config')).map(x => [x.key, x.value]));
+const finSet = (k, v) => v === null ? run('DELETE FROM fin_config WHERE key=?', [k]) : run('INSERT INTO fin_config VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', [k, String(v)]);
+const finUsers = async () => { try { return JSON.parse((await one("SELECT value FROM fin_config WHERE key='fin_users'"))?.value || '[]'); } catch { return []; } };
+const isFin = async u => u.role === 'admin' || u.role === 'director' || (u.role === 'teacher' && (await finUsers()).includes(u.id));
+const needFin = async u => { if (!(await isFin(u))) bad("Ruxsat yo'q", 403); };
+const intAmt = (v, name = 'Summa') => { const n = Number(v); if (!Number.isInteger(n) || Math.abs(n) > 1e10) bad(name + " butun son (so'm) bo'lsin"); return n; };
+const curMonth = () => tashkentToday().slice(0, 7);
+const yearStart = () => { const t = tashkentToday(), y = +t.slice(0, 4); return (+t.slice(5, 7) >= 9 ? y : y - 1) + '-09'; };
+const effFee = (cls, plan) => { const base = plan && plan.monthly !== null && plan.monthly !== undefined ? plan.monthly : (cls || 0), d = plan ? plan.discount_pct || 0 : 0; return Math.round(base * (100 - d) / 100); };
+r('GET', '/fin/config', async ({ u }) => {
+  await needFin(u); const c = await finCfg(), adm = u.role === 'admin';
+  const org = Object.fromEntries(['org_name', 'org_inn', 'org_bank', 'org_account', 'org_mfo', 'org_phone', 'org_note'].map(k => [k, c[k] || '']));
+  return { org, min_online: +(c.min_online || 1000), click_on: !!(c.click_service_id && c.click_secret), payme_on: !!(c.payme_merchant_id && c.payme_key),
+    ...(adm ? { click: { service_id: c.click_service_id || '', merchant_id: c.click_merchant_id || '', user_id: c.click_user_id || '', secret_set: !!c.click_secret }, payme: { merchant_id: c.payme_merchant_id || '', key_set: !!c.payme_key, test: c.payme_test === '1' }, fin_users: await finUsers() } : {}) };
+});
+r('PUT', '/fin/config', async ({ u, b }) => {
+  need(u, 'admin');
+  for (const k of ['org_name', 'org_inn', 'org_bank', 'org_account', 'org_mfo', 'org_phone', 'org_note']) if (b[k] !== undefined) { const v = String(b[k]).trim().slice(0, 300); if (k === 'org_inn' && v && !/^\d{9}$|^\d{14}$/.test(v)) bad("INN 9 raqamdan iborat bo'lsin (jismoniy shaxs uchun 14)"); await finSet(k, v || null); }
+  for (const k of ['click_service_id', 'click_merchant_id', 'click_user_id', 'payme_merchant_id']) if (b[k] !== undefined) { const v = String(b[k]).trim().slice(0, 100); if (v && !/^[A-Za-z0-9_-]+$/.test(v)) bad(k + " noto'g'ri belgilar"); await finSet(k, v || null); }
+  for (const k of ['click_secret', 'payme_key']) if (b[k]) await finSet(k, String(b[k]).trim().slice(0, 200)); else if (b['clear_' + k]) await finSet(k, null); // bo'sh yuborilsa mavjud kalit saqlanadi
+  if (b.payme_test !== undefined) await finSet('payme_test', b.payme_test ? '1' : '0');
+  if (b.min_online !== undefined) { const m = intAmt(b.min_online, 'Minimal summa'); if (m < 1 || m > 1e7) bad("Minimal summa 1 dan 10 000 000 gacha"); await finSet('min_online', m); }
+  if (b.fin_users !== undefined) { const ids = [...new Set((Array.isArray(b.fin_users) ? b.fin_users : []).map(Number).filter(Number.isInteger))]; const ok = (await q("SELECT id FROM users WHERE role='teacher' AND is_active=1")).map(x => x.id); await finSet('fin_users', JSON.stringify(ids.filter(i => ok.includes(i)))); }
+  await audit(u, 'update', 'fin_config', '-', null, { keys: Object.keys(b).filter(k => !/secret|key/.test(k)) }); return { ok: 1 };
+});
+// --- tariflar
+r('GET', '/fin/tariffs', async ({ u, qs }) => {
+  await needFin(u); const c = +qs.class_id; if (!c) bad('class_id kerak');
+  const cf = await one('SELECT monthly FROM class_fee WHERE class_id=?', [c]), cm = cf ? cf.monthly : 0;
+  const st = await q("SELECT s.id,s.name,p.monthly,p.discount_pct,p.note FROM students s LEFT JOIN fee_plans p ON p.student_id=s.id WHERE s.class_id=? AND s.status='faol' ORDER BY s.name", [c]);
+  return { class_id: c, monthly: cm, students: st.map(x => ({ ...x, discount_pct: x.discount_pct || 0, effective: effFee(cm, x) })) };
+});
+r('PUT', '/fin/tariffs/class', async ({ u, b }) => {
+  await needFin(u); const c = +b.class_id, m = intAmt(b.monthly, 'Oylik to\'lov'); if (m < 0) bad("Manfiy bo'lmasin"); if (!(await one('SELECT 1 x FROM classes WHERE id=?', [c]))) bad('Sinf topilmadi', 404);
+  await run('INSERT INTO class_fee(class_id,monthly) VALUES(?,?) ON CONFLICT(class_id) DO UPDATE SET monthly=excluded.monthly', [c, m]); await audit(u, 'update', 'class_fee', c, null, { monthly: m }); return { ok: 1 };
+});
+r('PUT', '/fin/tariffs/student', async ({ u, b }) => {
+  await needFin(u); const id = +b.student_id; if (!(await one('SELECT 1 x FROM students WHERE id=?', [id]))) bad('Topilmadi', 404);
+  const m = b.monthly === null || b.monthly === '' || b.monthly === undefined ? null : intAmt(b.monthly, 'Oylik to\'lov'), d = Number(b.discount_pct || 0); if (m !== null && m < 0) bad("Manfiy bo'lmasin"); if (!Number.isInteger(d) || d < 0 || d > 100) bad('Chegirma 0 dan 100 foizgacha');
+  if (m === null && !d && !b.note) await run('DELETE FROM fee_plans WHERE student_id=?', [id]);
+  else await run('INSERT INTO fee_plans(student_id,monthly,discount_pct,note) VALUES(?,?,?,?) ON CONFLICT(student_id) DO UPDATE SET monthly=excluded.monthly,discount_pct=excluded.discount_pct,note=excluded.note', [id, m, d, String(b.note || '').slice(0, 200) || null]);
+  await audit(u, 'update', 'fee_plan', id, null, { monthly: m, discount_pct: d }); return { ok: 1 };
+});
+// --- hisoblash
+r('POST', '/fin/charges/generate', async ({ u, b }) => {
+  await needFin(u); const per = String(b.period || ''); if (!MONTH.test(per)) bad("Oy YYYY-MM ko'rinishida bo'lsin");
+  const c = b.class_id ? +b.class_id : 0, sts = await q(`SELECT s.id,s.class_id,p.monthly,p.discount_pct,COALESCE(cf.monthly,0) cm FROM students s LEFT JOIN fee_plans p ON p.student_id=s.id LEFT JOIN class_fee cf ON cf.class_id=s.class_id WHERE s.status='faol'${c ? ' AND s.class_id=?' : ''}`, c ? [c] : []);
+  const have = new Set((await q("SELECT student_id FROM charges WHERE period=? AND kind='oylik'", [per])).map(x => x.student_id)), st = []; let skipped = 0, zero = 0;
+  for (const s of sts) { if (have.has(s.id)) { skipped++; continue; } const a = effFee(s.cm, s); if (a <= 0) { zero++; continue; } st.push({ sql: "INSERT INTO charges(student_id,period,amount,kind,note,created_at) VALUES(?,?,?,'oylik',NULL,?)", args: [s.id, per, a, now()] }); }
+  if (st.length) await db.batch(st, 'write'); await audit(u, 'generate', 'charges', per, null, { created: st.length, class_id: c || null });
+  return { created: st.length, already: skipped, no_tariff: zero };
+});
+r('POST', '/fin/charges', async ({ u, b }) => {
+  await needFin(u); const id = +b.student_id, a = intAmt(b.amount); if (!a) bad("Summa 0 bo'lmasin (chegirma uchun manfiy yozing)"); if (!(await one('SELECT 1 x FROM students WHERE id=?', [id]))) bad('Topilmadi', 404);
+  const per = b.period ? String(b.period) : curMonth(); if (!MONTH.test(per)) bad("Oy YYYY-MM ko'rinishida bo'lsin"); const note = String(b.note || '').trim().slice(0, 200); if (!note) bad('Izoh kerak (nima uchun)');
+  const x = await run("INSERT INTO charges(student_id,period,amount,kind,note,created_at) VALUES(?,?,?,'boshqa',?,?)", [id, per, a, note, now()]); await audit(u, 'create', 'charge', Number(x.lastInsertRowid), null, { student_id: id, amount: a }); return { id: Number(x.lastInsertRowid) };
+});
+r('DELETE', '/fin/charges/(\\d+)', async ({ u, m }) => { await needFin(u); const o = await one('SELECT * FROM charges WHERE id=?', [+m[1]]); if (!o) bad('Topilmadi', 404); await run('DELETE FROM charges WHERE id=?', [o.id]); await audit(u, 'delete', 'charge', o.id, o, null); return { ok: 1 }; });
+// --- to'lovlar
+const payIns = (sid, amount, method, paid_on, note, by, ext) => run("INSERT INTO payments(student_id,amount,method,paid_on,note,ext_id,status,created_by,created_at) VALUES(?,?,?,?,?,?,'ok',?,?)", [sid, amount, method, paid_on, note || null, ext || null, by || null, now()]);
+r('POST', '/fin/payments', async ({ u, b }) => {
+  await needFin(u); const id = +b.student_id, a = intAmt(b.amount); if (a <= 0) bad("Summa 0 dan katta bo'lsin"); if (!(await one('SELECT 1 x FROM students WHERE id=?', [id]))) bad('Topilmadi', 404);
+  const me = String(b.method || 'naqd'); if (!PMETH.includes(me)) bad("To'lov turi noto'g'ri"); const dt = b.paid_on ? String(b.paid_on) : tashkentToday(); if (!DATE.test(dt) || dt > tashkentToday()) bad("Sana noto'g'ri yoki kelajakda");
+  const x = await payIns(id, a, me, dt, String(b.note || '').trim().slice(0, 200), u.id); await audit(u, 'create', 'payment', Number(x.lastInsertRowid), null, { student_id: id, amount: a, method: me }); return { id: Number(x.lastInsertRowid) };
+});
+r('DELETE', '/fin/payments/(\\d+)', async ({ u, m }) => {
+  await needFin(u); const o = await one('SELECT * FROM payments WHERE id=?', [+m[1]]); if (!o) bad('Topilmadi', 404); if (o.status === 'cancelled') return { ok: 1 };
+  await run("UPDATE payments SET status='cancelled' WHERE id=?", [o.id]); await audit(u, 'cancel', 'payment', o.id, { amount: o.amount, method: o.method }, null); return { ok: 1 };
+});
+// --- qoldiq va hisobotlar
+async function finRows(cl, from, to) {
+  const f1 = from + '-01', t1 = to + '-31';
+  return q(`SELECT s.id,s.name,s.class_id,c.name cls,
+    COALESCE((SELECT SUM(amount) FROM charges WHERE student_id=s.id AND period<?),0) ch0, COALESCE((SELECT SUM(amount) FROM payments WHERE student_id=s.id AND status='ok' AND paid_on<?),0) pa0,
+    COALESCE((SELECT SUM(amount) FROM charges WHERE student_id=s.id AND period>=? AND period<=?),0) ch1, COALESCE((SELECT SUM(amount) FROM payments WHERE student_id=s.id AND status='ok' AND paid_on>=? AND paid_on<=?),0) pa1
+    FROM students s JOIN classes c ON c.id=s.class_id WHERE s.status='faol'${cl ? ' AND s.class_id=?' : ''} ORDER BY c.name,s.name`, [from, f1, from, to, f1, t1, ...(cl ? [cl] : [])]);
+}
+const finShape = x => ({ id: x.id, name: x.name, class_id: x.class_id, class: x.cls, opening: x.ch0 - x.pa0, charged: x.ch1, paid: x.pa1, balance: x.ch0 - x.pa0 + x.ch1 - x.pa1 });
+const finRange = qs => { const from = qs.from || yearStart(), to = qs.to || curMonth(); if (!MONTH.test(from) || !MONTH.test(to) || from > to) bad("Oraliq noto'g'ri (YYYY-MM)"); return [from, to]; };
+r('GET', '/fin/summary', async ({ u, qs }) => {
+  await needFin(u); const [from, to] = finRange(qs), cl = qs.class_id ? +qs.class_id : 0, rows = (await finRows(cl, from, to)).map(finShape);
+  return { from, to, rows, totals: rows.reduce((t, x) => ({ opening: t.opening + x.opening, charged: t.charged + x.charged, paid: t.paid + x.paid, balance: t.balance + x.balance }), { opening: 0, charged: 0, paid: 0, balance: 0 }) };
+});
+r('GET', '/fin/report', async ({ u, qs }) => {
+  await needFin(u); const [from, to] = finRange(qs), rows = (await finRows(0, from, to)).map(finShape), by = {};
+  for (const x of rows) { const c = (by[x.class_id] ||= { class_id: x.class_id, class: x.class, students: 0, opening: 0, charged: 0, paid: 0, balance: 0, debtors: 0 }); c.students++; for (const k of ['opening', 'charged', 'paid', 'balance']) c[k] += x[k]; if (x.balance > 0) c.debtors++; }
+  const f1 = from + '-01', t1 = to + '-31', meth = await q("SELECT method,SUM(amount) s,COUNT(*) n FROM payments WHERE status='ok' AND paid_on>=? AND paid_on<=? GROUP BY method ORDER BY s DESC", [f1, t1]);
+  const mc = await q('SELECT period m,SUM(amount) s FROM charges WHERE period>=? AND period<=? GROUP BY period', [from, to]), mp = await q("SELECT substr(paid_on,1,7) m,SUM(amount) s FROM payments WHERE status='ok' AND paid_on>=? AND paid_on<=? GROUP BY 1", [f1, t1]);
+  const months = [...new Set([...mc, ...mp].map(x => x.m))].sort();
+  const totals = rows.reduce((t, x) => ({ opening: t.opening + x.opening, charged: t.charged + x.charged, paid: t.paid + x.paid, balance: t.balance + x.balance, debtors: t.debtors + (x.balance > 0 ? 1 : 0), prepaid: t.prepaid + (x.balance < 0 ? -x.balance : 0), debt: t.debt + (x.balance > 0 ? x.balance : 0) }), { opening: 0, charged: 0, paid: 0, balance: 0, debtors: 0, prepaid: 0, debt: 0 });
+  return { from, to, totals, by_class: Object.values(by), by_method: meth, monthly: months.map(m => ({ month: m, charged: (mc.find(x => x.m === m) || {}).s || 0, paid: (mp.find(x => x.m === m) || {}).s || 0 })) };
+});
+async function statement(id) {
+  const ch = await q('SELECT id,period,amount,kind,note,created_at FROM charges WHERE student_id=?', [id]), pa = await q("SELECT id,amount,method,paid_on,note,status,created_at FROM payments WHERE student_id=? ORDER BY paid_on,id", [id]);
+  const ev = [...ch.map(x => ({ type: 'charge', id: x.id, date: x.period + '-01', amount: x.amount, label: x.kind === 'oylik' ? 'Oylik to\'lov' : x.note, period: x.period, kind: x.kind, note: x.note, ts: x.created_at })), ...pa.map(x => ({ type: 'payment', id: x.id, date: x.paid_on, amount: x.amount, label: "To'lov", method: x.method, note: x.note, status: x.status, ts: x.created_at }))].sort((a, b) => (a.date + (a.type === 'charge' ? 0 : 1) + (a.ts || '')) < (b.date + (b.type === 'charge' ? 0 : 1) + (b.ts || '')) ? -1 : 1);
+  let bal = 0; for (const e of ev) { if (e.type === 'charge') bal += e.amount; else if (e.status === 'ok') bal -= e.amount; e.balance = bal; }
+  const t = new Date().toISOString().slice(0, 7), due = ch.filter(x => x.period <= curMonth()).reduce((a, x) => a + x.amount, 0), paid = pa.filter(x => x.status === 'ok').reduce((a, x) => a + x.amount, 0);
+  return { events: ev, charged_total: ch.reduce((a, x) => a + x.amount, 0), due, paid, balance: due - paid };
+}
+r('GET', '/fin/student/(\\d+)', async ({ u, m }) => { await needFin(u); const s = await one('SELECT s.id,s.name,c.name class FROM students s JOIN classes c ON c.id=s.class_id WHERE s.id=?', [+m[1]]); if (!s) bad('Topilmadi', 404); return { student: s, ...(await statement(s.id)) }; });
+// --- o'quvchi/ota-ona kabineti
+const payUrls = async (sid, amount) => {
+  const c = await finCfg(), out = {};
+  if (c.payme_merchant_id && c.payme_key) out.payme = (c.payme_test === '1' ? 'https://test.paycom.uz/' : 'https://checkout.paycom.uz/') + Buffer.from(`m=${c.payme_merchant_id};ac.student_id=${sid};a=${amount * 100}`).toString('base64');
+  if (c.click_service_id && c.click_merchant_id && c.click_secret) out.click = `https://my.click.uz/services/pay?service_id=${encodeURIComponent(c.click_service_id)}&merchant_id=${encodeURIComponent(c.click_merchant_id)}&amount=${amount}&transaction_param=${sid}`;
+  return { urls: out, min: +(c.min_online || 1000) };
+};
+r('GET', '/student/billing', async ({ u }) => {
+  const c = await finCfg(), st = await statement(u.id), has = !!(await one('SELECT 1 x FROM charges WHERE student_id=?', [u.id]));
+  return { ...st, has_billing: has, org: Object.fromEntries(['org_name', 'org_inn', 'org_bank', 'org_account', 'org_mfo', 'org_phone', 'org_note'].map(k => [k, c[k] || ''])), online: { click: !!(c.click_service_id && c.click_merchant_id && c.click_secret), payme: !!(c.payme_merchant_id && c.payme_key), min: +(c.min_online || 1000) } };
+});
+r('POST', '/student/pay-link', async ({ u, b }) => {
+  const a = intAmt(b.amount), p = await payUrls(u.id, a); if (a < p.min) bad(`Minimal summa ${p.min} so'm`); if (a > 1e8) bad("Summa juda katta");
+  const url = p.urls[b.provider]; if (!url) bad("Bu to'lov usuli yoqilmagan"); return { url };
+});
+// --- Payme Merchant API (JSON-RPC)
+const PE = { auth: [-32504, "Недостаточно привилегий для выполнения метода", "Usulni bajarish uchun huquq yetarli emas", 'Insufficient privileges'], amount: [-31001, 'Неверная сумма', "Noto'g'ri summa", 'Wrong amount'], nf: [-31003, 'Транзакция не найдена', 'Tranzaksiya topilmadi', 'Transaction not found'], cant: [-31008, 'Невозможно выполнить операцию', 'Amalni bajarib bo\'lmaydi', 'Unable to complete operation'], acc: [-31050, 'Аккаунт не найден', 'Hisob topilmadi', 'Account not found'], meth: [-32601, 'Метод не найден', 'Usul topilmadi', 'Method not found'] };
+const pErr = (id, k, data) => ({ jsonrpc: '2.0', id, error: { code: PE[k][0], message: { ru: PE[k][1], uz: PE[k][2], en: PE[k][3] }, ...(data ? { data } : {}) } });
+const PTMO = 43200000;
+r('POST', '/pay/payme', async ({ b, ev }) => {
+  const c = await finCfg(), id = b && b.id !== undefined ? b.id : null;
+  const hdr = String(ev.headers?.authorization || ''), want = 'Basic ' + Buffer.from('Paycom:' + (c.payme_key || '')).toString('base64');
+  if (!c.payme_key || hdr.length !== want.length || !crypto.timingSafeEqual(Buffer.from(hdr), Buffer.from(want))) return pErr(id, 'auth');
+  const p = b.params || {}, ok = x => ({ jsonrpc: '2.0', id, result: x }), min = +(c.min_online || 1000);
+  const acct = async () => { const sid = Number(p.account && p.account.student_id); return Number.isInteger(sid) && sid > 0 ? one("SELECT id FROM students WHERE id=? AND status='faol'", [sid]) : null; };
+  const amt = () => { const a = Number(p.amount); return Number.isInteger(a) && a % 100 === 0 && a / 100 >= min && a / 100 <= 1e8 ? a / 100 : null; };
+  const shape = t => ({ create_time: t.create_time, perform_time: t.perform_time || 0, cancel_time: t.cancel_time || 0, transaction: String(t.id), state: t.state, reason: t.reason ?? null });
+  const find = () => one("SELECT * FROM gateway_tx WHERE provider='payme' AND ext_id=?", [String(p.id || '')]);
+  const expire = async t => { if (t.state === 1 && Date.now() - t.create_time > PTMO) { await run("UPDATE gateway_tx SET state=-1,reason=4,cancel_time=? WHERE id=?", [Date.now(), t.id]); return true; } return false; };
+  switch (b.method) {
+    case 'CheckPerformTransaction': if (!(await acct())) return pErr(id, 'acc', 'student_id'); if (amt() === null) return pErr(id, 'amount'); return ok({ allow: true });
+    case 'CreateTransaction': {
+      let t = await find(); if (t) { if (await expire(t)) return pErr(id, 'cant'); if (t.state !== 1) return pErr(id, 'cant'); return ok({ create_time: t.create_time, transaction: String(t.id), state: 1 }); }
+      if (!(await acct())) return pErr(id, 'acc', 'student_id'); const a = amt(); if (a === null) return pErr(id, 'amount');
+      const x = await run("INSERT INTO gateway_tx(provider,ext_id,student_id,amount,state,create_time) VALUES('payme',?,?,?,1,?)", [String(p.id), Number(p.account.student_id), a, Date.now()]); t = await one('SELECT * FROM gateway_tx WHERE id=?', [Number(x.lastInsertRowid)]);
+      return ok({ create_time: t.create_time, transaction: String(t.id), state: 1 });
+    }
+    case 'PerformTransaction': {
+      const t = await find(); if (!t) return pErr(id, 'nf'); if (t.state === 2) return ok({ transaction: String(t.id), perform_time: t.perform_time, state: 2 }); if (await expire(t) || t.state !== 1) return pErr(id, 'cant');
+      const pm = await payIns(t.student_id, t.amount, 'payme', tashkentToday(), 'Payme (onlayn)', null, 'payme:' + t.ext_id), pt = Date.now();
+      await run('UPDATE gateway_tx SET state=2,perform_time=?,payment_id=? WHERE id=?', [pt, Number(pm.lastInsertRowid), t.id]); return ok({ transaction: String(t.id), perform_time: pt, state: 2 });
+    }
+    case 'CancelTransaction': {
+      const t = await find(); if (!t) return pErr(id, 'nf'); if (t.state < 0) return ok({ transaction: String(t.id), cancel_time: t.cancel_time, state: t.state });
+      const st = t.state === 2 ? -2 : -1, ct = Date.now(); if (t.state === 2 && t.payment_id) await run("UPDATE payments SET status='cancelled' WHERE id=?", [t.payment_id]);
+      await run('UPDATE gateway_tx SET state=?,reason=?,cancel_time=? WHERE id=?', [st, Number.isInteger(p.reason) ? p.reason : null, ct, t.id]); return ok({ transaction: String(t.id), cancel_time: ct, state: st });
+    }
+    case 'CheckTransaction': { const t = await find(); return t ? ok(shape(t)) : pErr(id, 'nf'); }
+    case 'GetStatement': { const f = Number(p.from), to = Number(p.to), rows = await q("SELECT * FROM gateway_tx WHERE provider='payme' AND create_time>=? AND create_time<=? ORDER BY create_time", [f, to]);
+      return ok({ transactions: rows.map(t => ({ id: t.ext_id, time: t.create_time, amount: t.amount * 100, account: { student_id: String(t.student_id) }, ...shape(t) })) }); }
+    default: return pErr(id, 'meth');
+  }
+});
+// --- Click SHOP API (prepare / complete)
+const md5 = s => crypto.createHash('md5').update(s).digest('hex');
+const clickReply = (p, extra, code, note) => ({ click_trans_id: p.click_trans_id, merchant_trans_id: p.merchant_trans_id, ...extra, error: code, error_note: note });
+async function clickGuard(b, complete) {
+  const c = await finCfg(), p = b || {}; const f = k => String(p[k] ?? '');
+  if (!c.click_secret || !c.click_service_id) return { e: [-8, 'Click sozlanmagan'] };
+  const base = f('click_trans_id') + f('service_id') + c.click_secret + f('merchant_trans_id') + (complete ? f('merchant_prepare_id') : '') + f('amount') + f('action') + f('sign_time');
+  if (f('service_id') !== String(c.click_service_id) || md5(base) !== f('sign_string')) return { e: [-1, 'SIGN CHECK FAILED!'] };
+  const sid = Number(p.merchant_trans_id), s = Number.isInteger(sid) && sid > 0 ? await one("SELECT id FROM students WHERE id=? AND status='faol'", [sid]) : null;
+  if (!s) return { e: [-5, 'User does not exist'] };
+  const a = Number(p.amount); if (!(a >= +(c.min_online || 1000)) || a > 1e8 || Math.round(a) !== a) return { e: [-2, 'Incorrect parameter amount'] };
+  return { sid, a, p };
+}
+r('POST', '/pay/click/prepare', async ({ b }) => {
+  const g = await clickGuard(b, false); if (g.e) return clickReply(b || {}, {}, g.e[0], g.e[1]); if (String(b.action) !== '0') return clickReply(b, {}, -3, 'Action not found');
+  const ex = await one("SELECT * FROM gateway_tx WHERE provider='click' AND ext_id=?", [String(b.click_trans_id)]); if (ex) return clickReply(b, { merchant_prepare_id: ex.id }, ex.state === 2 ? -4 : ex.state < 0 ? -9 : 0, ex.state === 2 ? 'Already paid' : ex.state < 0 ? 'Transaction cancelled' : 'Success');
+  const x = await run("INSERT INTO gateway_tx(provider,ext_id,student_id,amount,state,create_time) VALUES('click',?,?,?,1,?)", [String(b.click_trans_id), g.sid, g.a, Date.now()]); return clickReply(b, { merchant_prepare_id: Number(x.lastInsertRowid) }, 0, 'Success');
+});
+r('POST', '/pay/click/complete', async ({ b }) => {
+  const g = await clickGuard(b, true); if (g.e) return clickReply(b || {}, {}, g.e[0], g.e[1]); if (String(b.action) !== '1') return clickReply(b, {}, -3, 'Action not found');
+  const t = await one("SELECT * FROM gateway_tx WHERE provider='click' AND id=? AND ext_id=?", [Number(b.merchant_prepare_id) || 0, String(b.click_trans_id)]); if (!t) return clickReply(b, {}, -6, 'Transaction does not exist');
+  if (t.student_id !== g.sid || t.amount !== g.a) return clickReply(b, {}, -2, 'Incorrect parameter amount');
+  if (t.state === 2) return clickReply(b, { merchant_confirm_id: t.payment_id }, -4, 'Already paid'); if (t.state < 0) return clickReply(b, {}, -9, 'Transaction cancelled');
+  if (Number(b.error) < 0) { await run('UPDATE gateway_tx SET state=-1,cancel_time=?,reason=? WHERE id=?', [Date.now(), Number(b.error), t.id]); return clickReply(b, {}, -9, 'Transaction cancelled'); }
+  const pm = await payIns(t.student_id, t.amount, 'click', tashkentToday(), 'Click (onlayn)', null, 'click:' + t.ext_id);
+  await run('UPDATE gateway_tx SET state=2,perform_time=?,payment_id=? WHERE id=?', [Date.now(), Number(pm.lastInsertRowid), t.id]); return clickReply(b, { merchant_confirm_id: Number(pm.lastInsertRowid) }, 0, 'Success');
+});
 r('GET', '/dashboard', async ({ u }) => {
   const today = tashkentToday(), wd = new Date(today + 'T12:00:00Z').getUTCDay() || 7, tch = u.role === 'teacher';
   const cl = tch ? await q('SELECT id FROM classes WHERE homeroom_id=? UNION SELECT class_id FROM assignments WHERE teacher_id=?', [u.id, u.id]) : await q('SELECT id FROM classes');
@@ -465,7 +813,7 @@ r('GET', '/dashboard', async ({ u }) => {
   return {
     date: today, weekday: wd, role: u.role,
     classes: ids.length, students: (await one(`SELECT COUNT(*) n FROM students WHERE status='faol' AND class_id IN(${ph})`, ids)).n,
-    lessons_today: await q(`SELECT t.start,t.end,t.room,c.name class,s.name subject,us.name teacher,t.class_id,t.subject_id FROM timetable t JOIN classes c ON c.id=t.class_id JOIN subjects s ON s.id=t.subject_id JOIN users us ON us.id=t.teacher_id WHERE t.weekday=?${tch ? ' AND t.teacher_id=?' : ''} ORDER BY t.start`, tch ? [wd, u.id] : [wd]),
+    lessons_today: await q(`SELECT t.start,t.end,t.room,t.slot,c.name class,s.name subject,us.name teacher,t.class_id,t.subject_id,(SELECT COUNT(*) FROM attendance a WHERE a.class_id=t.class_id AND a.subject_id=t.subject_id AND a.date='${today}') marked,(SELECT COALESCE(l.topic,'') FROM lessons l WHERE l.class_id=t.class_id AND l.subject_id=t.subject_id AND l.date='${today}') topic FROM timetable t JOIN classes c ON c.id=t.class_id JOIN subjects s ON s.id=t.subject_id JOIN users us ON us.id=t.teacher_id WHERE t.weekday=?${tch ? ' AND t.teacher_id=?' : ''} ORDER BY t.start`, tch ? [wd, u.id] : [wd]),
     attendance_today: Object.fromEntries(['keldi', 'kelmadi', 'kechikdi', 'uzrli'].map(k => [k, (att.find(x => x.status === k) || { n: 0 }).n])),
     recent_grades: await q(`SELECT g.date,g.type,g.value,g.max,st.name student,c.name class,s.name subject FROM grades g JOIN students st ON st.id=g.student_id JOIN classes c ON c.id=g.class_id JOIN subjects s ON s.id=g.subject_id${tch ? ' WHERE g.teacher_id=?' : ''} ORDER BY g.id DESC LIMIT 8`, tch ? [u.id] : []),
     scope: tch ? 'faqat o\'zingizga tegishli' : 'butun maktab'
@@ -503,7 +851,7 @@ r('POST', '/export/xlsx', async ({ b }) => { // faqat mijoz yuborgan (allaqachon
   return { name: String(b.name || 'hisobot').replace(/[^\w.-]+/g, '_').slice(0, 60) + '.xlsx', base64: xlsx(rows, String(b.sheet || 'Hisobot')).toString('base64') };
 });
 
-const BK = ['settings', 'users', 'subjects', 'teacher_subjects', 'classes', 'assignments', 'students', 'timetable', 'lessons', 'grades', 'attendance', 'academic_years', 'terms', 'bell_slots', 'grade_types', 'audit_logs'];
+const BK = ['settings', 'users', 'subjects', 'teacher_subjects', 'classes', 'assignments', 'students', 'timetable', 'lessons', 'grades', 'attendance', 'period_grades', 'class_fee', 'fee_plans', 'charges', 'payments', 'gateway_tx', 'academic_years', 'terms', 'bell_slots', 'grade_types', 'audit_logs'];
 r('GET', '/backup', async ({ u }) => {
   need(u, 'admin'); const out = { version: 2, exported_at: now() };
   for (const t of BK) out[t] = await q(`SELECT * FROM ${t}`);
@@ -516,8 +864,8 @@ r('POST', '/restore', async ({ u, b }) => {
   const d = b.data; if (!d || typeof d !== 'object' || !Array.isArray(d.classes) || !Array.isArray(d.students) || d.version !== 2 || !d.exported_at || !Array.isArray(d.users)) bad("Zaxira fayli noto'g'ri yoki bu tizimning zaxirasi emas");
   const cols = {}; for (const t of BK) cols[t] = (await q(`PRAGMA table_info(${t})`)).map(c => c.name);
   const ins = (t, row) => { const ks = Object.keys(row).filter(k => cols[t].includes(k)); return { sql: `INSERT INTO ${t}(${ks.join(',')}) VALUES(${ks.map(() => '?').join(',')})`, args: ks.map(k => row[k] ?? null) }; };
-  const wipe = ['student_accounts', 'attendance', 'grades', 'lessons', 'timetable', 'students', 'assignments', 'teacher_subjects', 'classes', 'subjects', 'terms', 'academic_years', 'bell_slots', 'grade_types'];
-  const fill = ['subjects', 'classes', 'students', 'assignments', 'teacher_subjects', 'timetable', 'lessons', 'grades', 'attendance', 'academic_years', 'terms', 'bell_slots', 'grade_types'];
+  const wipe = ['gateway_tx', 'payments', 'charges', 'fee_plans', 'class_fee', 'access_links', 'admission_resets', 'parent_accounts', 'student_accounts', 'period_grades', 'attendance', 'grades', 'lessons', 'timetable', 'students', 'assignments', 'teacher_subjects', 'classes', 'subjects', 'terms', 'academic_years', 'bell_slots', 'grade_types'];
+  const fill = ['subjects', 'classes', 'students', 'assignments', 'teacher_subjects', 'timetable', 'lessons', 'grades', 'attendance', 'academic_years', 'terms', 'period_grades', 'class_fee', 'fee_plans', 'charges', 'payments', 'gateway_tx', 'bell_slots', 'grade_types'];
   const have = new Set((await q('SELECT id FROM users')).map(x => x.id)), st = [];
   for (const x of d.users || []) if (!have.has(x.id)) st.push({ sql: 'INSERT INTO users(id,login,name,pass,role,is_active,created_at) VALUES(?,?,?,?,?,0,?)', args: [x.id, x.login, x.name, 'x:x', x.role, x.created_at || null] });
   for (const t of wipe) st.push({ sql: `DELETE FROM ${t}`, args: [] });
@@ -530,7 +878,9 @@ r('POST', '/restore', async ({ u, b }) => {
 // ===== Login urinishlarini cheklash (jarayon xotirasida; bir nechta nusxa bo'lsa har biri alohida hisoblaydi) =====
 const FAILS = new Map(), MAXF = 8, WIN = 10 * 60e3;
 const failKey = (ip, login) => ip + '|' + String(login || '').toLowerCase().slice(0, 40);
-const locked = k => { const f = FAILS.get(k); if (!f) return false; if (Date.now() - f.t > WIN) { FAILS.delete(k); return false; } return f.n >= MAXF; };
+const loginKey = login => 'L|' + String(login || '').toLowerCase().slice(0, 40); // IP soxtalashtirilsa ham bitta loginga hujumni cheklaydi
+setInterval(() => { const t = Date.now(); for (const [k, f] of FAILS) if (t - f.t > WIN) FAILS.delete(k); }, 5 * 60e3).unref();
+const locked = (k, max = MAXF) => { const f = FAILS.get(k); if (!f) return false; if (Date.now() - f.t > WIN) { FAILS.delete(k); return false; } return f.n >= max; };
 const failed = k => { const f = FAILS.get(k); FAILS.set(k, f && Date.now() - f.t <= WIN ? { n: f.n + 1, t: f.t } : { n: 1, t: Date.now() }); };
 
 // ===== Hafta va oy o'quvchisi: faqat baholangan ishlarning o'rtacha foizi (baholanmagan ish hisobga olinmaydi) =====
@@ -575,20 +925,20 @@ exports.handler = async ev => {
     const path = (ev.path || '').replace(/^\/(\.netlify\/functions\/api|api)/, '') || '/';
     const method = ev.httpMethod, hit = routes.find(x => x[0] === method && x[1].test(path));
     if (!hit) bad('Topilmadi', 404);
-    let u = null; const open = path === '/login' || path === '/public' || path === '/public/home' || path === '/logout';
+    let u = null; const open = path.startsWith('/pay/') || path === '/login' || path === '/link-login' || path === '/public' || path === '/public/home' || path === '/logout';
     if (!open) {
       const ck = /(?:^|;\s*)sid=([^;]+)/.exec(ev.headers?.cookie || ''); const d = unsign(ck && ck[1]);
-      if (d && d.k === 's') { // o'quvchi sessiyasi: parol almashtirilsa yoki hisob o'chirilsa/bloklansa darhol bekor bo'ladi
-        const a = await one("SELECT s.id,s.name,s.class_id,a.pass FROM students s JOIN student_accounts a ON a.student_id=s.id WHERE s.id=? AND a.is_active=1 AND s.status='faol'", [d.id]);
-        u = a && a.pass.slice(-12) === d.pv ? { id: a.id, name: a.name, role: 'student', class_id: a.class_id } : null;
-      } else u = d && await one('SELECT id,name,role FROM users WHERE id=? AND is_active=1', [d.id]);
+      if (d && (d.k === 's' || d.k === 'p')) { // o'quvchi/ota-ona sessiyasi: parol almashtirilsa yoki hisob o'chirilsa/bloklansa darhol bekor bo'ladi
+        const par = d.k === 'p', a = await one(`SELECT s.id,s.name,s.class_id,a.pass FROM students s JOIN ${par ? 'parent_accounts' : 'student_accounts'} a ON a.student_id=s.id WHERE s.id=? AND a.is_active=1 AND s.status='faol'`, [d.id]);
+        u = a && a.pass.slice(-12) === d.pv ? { id: a.id, name: a.name, role: par ? 'parent' : 'student', class_id: a.class_id } : null;
+      } else { const w = d && await one('SELECT id,name,role,pass FROM users WHERE id=? AND is_active=1', [d.id]); u = w && w.pass.slice(-12) === d.pv ? { id: w.id, name: w.name, role: w.role } : null; } // parol almashsa eski sessiyalar bekor
       if (!u) bad('Kirish talab qilinadi', 401);
       // o'quvchi faqat o'z kabinetiga kira oladi (qolgan barcha yo'llar taqiqlanadi)
-      if (u.role === 'student' && !(path === '/me' || path.startsWith('/student/'))) bad('Ruxsat yo\'q', 403);
+      if ((u.role === 'student' || u.role === 'parent') && !(path === '/me' || path.startsWith('/student/'))) bad('Ruxsat yo\'q', 403);
     }
-    const b = ev.body ? JSON.parse(ev.body) : {};
+    let b; try { const raw = ev.body && ev.isBase64Encoded ? Buffer.from(ev.body, 'base64').toString() : ev.body, ct = String(ev.headers?.['content-type'] || ''); b = !raw ? {} : /x-www-form-urlencoded/.test(ct) ? Object.fromEntries(new URLSearchParams(raw)) : JSON.parse(raw); } catch { bad("So'rov noto'g'ri", 400); } if (!b || typeof b !== 'object') b = {};
     const ip = String(ev.headers?.['x-forwarded-for'] || ev.headers?.['x-nf-client-connection-ip'] || '-').split(',')[0].trim();
-    const res = await hit[2]({ u, b, ip, qs: ev.queryStringParameters || {}, m: hit[1].exec(path) });
+    const res = await hit[2]({ u, b, ip, ev, qs: ev.queryStringParameters || {}, m: hit[1].exec(path) });
     if (res && 'cookie' in res) {
       const val = res.cookie ? `sid=${res.cookie}; Max-Age=43200` : 'sid=; Max-Age=0';
       return { statusCode: 200, headers: { ...H, 'set-cookie': `${val}; Path=/; HttpOnly; Secure; SameSite=Strict` }, body: JSON.stringify(res.body || { ok: 1 }) };

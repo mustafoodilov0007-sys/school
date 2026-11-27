@@ -1,37 +1,64 @@
-# Maktab boshqaruv platformasi (Netlify + Turso)
-## Joylash
-1. Turso: `turso db create school` → `turso db show school --url` va `turso db tokens create school`.
-2. Kodni GitHub'ga yuklang → Netlify'da "Import from Git". (Build command kerak emas.)
-3. Netlify → Site settings → Environment variables:
-   `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `SESSION_SECRET` (uzun tasodifiy qator), `ADMIN_PASSWORD` (birinchi administrator, login: `admin`, ixtiyoriy `ADMIN_LOGIN`).
-4. Deploy. Jadvallar birinchi so'rovda avtomatik yaratiladi (CREATE IF NOT EXISTS — ma'lumot o'chmaydi).
+# Deutsch School MCHJ: maktab boshqaruv platformasi
+
+Elektron jurnal, davomat, dars jadvali, hisobotlar, o'quvchi va ota-ona kabineti, e'lonlar.
+Texnologiya: Node.js (`server.js`), SQLite/Turso (`@libsql/client`), bitta sahifali ilova (`public/index.html`).
+
+## Tuzilma
+- `server.js`: statik fayllar va `/api` (Railway uchun doimiy server), `/health` tekshiruvi.
+- `netlify/functions/api.js`: butun API mantig'i (Netlify funksiyasi va server.js bir xil kodni ishlatadi).
+- `public/index.html`: butun interfeys (mehmon sahifa, kirish oynasi, rollar paneli).
+- `test*.js`: avtomatik testlar (`npm test`).
+
+## Railway'ga joylash (tavsiya etiladi)
+1. Kodni GitHub'ga yuklang.
+2. Railway → New Project → Deploy from GitHub repo. Start buyrug'i `npm start`.
+3. **Ma'lumotlar saqlanishi (muhim).** Quyidagilardan birini tanlang, aks holda har deploydan keyin baza YO'QOLADI:
+   - Turso: `TURSO_DATABASE_URL` va `TURSO_AUTH_TOKEN` o'zgaruvchilari (tavsiya etiladi), yoki
+   - Railway **Volume**: Service → Volumes → Add Volume, Mount path `/data`.
+4. Service → **Variables**:
+   - `SESSION_SECRET`: kamida 32 belgi, tasodifiy (masalan, `openssl rand -hex 32`).
+   - `ADMIN_PASSWORD`: kamida 8 belgi (birinchi administrator, login `admin`, ixtiyoriy `ADMIN_LOGIN`).
+5. Settings → Networking → Generate Domain. Tekshirish: `<domen>/health` → `ok`.
+6. Zaxira: Xodimlar → «Zaxira nusxa» faylini muntazam yuklab oling.
+
+## Netlify (muqobil)
+Netlify'da Import from Git (build buyrug'i kerak emas), o'zgaruvchilar: `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `SESSION_SECRET`, `ADMIN_PASSWORD`.
+
+## Rollar
+- **Administrator / direktor**: butun maktab, xodimlar, sozlamalar, e'lonlar, zaxira.
+- **O'qituvchi**: o'z sinf va fanlari jurnali, davomat, baho, uy vazifasi.
+- **Sinf rahbari**: o'z sinfi o'quvchilari va ota-onalariga login-parol beradi.
+- **O'quvchi** va **ota-ona**: faqat o'z kabineti (baho, davomat, jadval, uy vazifasi, e'lonlar). Ota-ona logini `ota.<familiya>`.
+
+## Asosiy imkoniyatlar
+- eMaktab uslubidagi jurnal: ustunlar dars jadvaliga mos, davomat belgilari `k` (sababli), `s` (sababsiz), `dq` (kech qoldi). Mavzu va uy vazifasi jadvalning yonida: sana ustunini bosib tanlanadi, avtomatik saqlanadi.
+- Dars jadvali dars raqami bo'yicha, sudrab ko'chiriladi.
+- **Nazorat imtihoniga ruxsat**: oxirgi 14 kunda fan bo'yicha 4 ta sababsiz dars bo'lsa ruxsat berilmaydi (sozlanadi: Sozlamalar). O'quvchi ko'radi: mavzuni otrabotka qiling. O'qituvchi otrabotkadan keyin hisobni nolga tushiradi.
+- Hisobotlar (davomat qatnashgan/qatnashmagan, jurnal holati, sinf natijalari, ruxsat hisoboti): Excel, CSV, chop etish.
+- E'lonlar: hammaga, xodimlarga, o'quvchilarga yoki ota-onalarga; qadash mumkin.
+- Ochiq mehmon sahifa va kirish oynasi; hafta/oy o'quvchisi (standart o'chiq, Sozlamalar'da yoqiladi).
+- Zaxira nusxa va bitta tranzaksiyali tiklash, audit jurnali.
+
+## Xavfsizlik
+- Parollar scrypt bilan xeshlanadi; sessiya HMAC bilan imzolangan, `HttpOnly; Secure; SameSite=Strict` cookie (12 soat).
+- Login urinishi cheklanadi: IP+login uchun 10 daqiqada 8 ta xato, bitta login uchun jami 30 ta xato.
+- O'quvchi va ota-ona faqat `/me` va `/student/*` yo'llariga kira oladi; parol almashsa yoki hisob bloklansa sessiya darhol bekor bo'ladi.
+- Server sarlavhalari: CSP, X-Frame-Options, HSTS, nosniff.
+
+## To'lovlar (buxgalteriya)
+- Administrator **Sozlamalar** bo'limida tashkilot rekvizitlari (nom, INN, bank, hisob), buxgalter(lar)ni (o'qituvchi hisobi) va Click/Payme ma'lumotlarini kiritadi.
+- Tariflar: sinf uchun oylik summa, o'quvchiga alohida narx yoki chegirma (%). «Oylik to'lovni hisoblash» tanlangan oy uchun hisob yozadi (qayta bosilsa dublikat bo'lmaydi).
+- Qoldiq = hisoblangan − to'langan (musbat = qarz). Buxgalter to'lov qabul qiladi (naqd/bank/plastik), kvitansiya chop etadi, to'lovni bekor qiladi, qo'shimcha hisob yoki chegirma yozadi.
+- Buxgalteriya hisoboti: oylar, sinflar, to'lov turlari bo'yicha, qarzdorlar ro'yxati (Excel/CSV/chop etish).
+- O'quvchi/ota-ona «To'lovlar» bo'limida qancha to'langani, qancha qolgani, bank rekvizitlari va tarixni ko'radi; Click/Payme orqali to'laydi.
+- Click/Payme: kabinetlarida URL: `<domen>/api/pay/payme`, `<domen>/api/pay/click/prepare`, `<domen>/api/pay/click/complete`. **Haqiqiy to'lovdan oldin ularning sandbox/test muhitida albatta sinab ko'ring**: integratsiya faqat simulyatsiya bilan tekshirilgan.
+- Sirli kalitlar va shaxsiy havolalar zaxira nusxaga kirmaydi.
+
+## Boshqa imkoniyatlar
+- Chorak/yillik baholar (tortilgan o'rtacha, o'qituvchi tasdiqlaydi) va qaydnoma; xodim paroli; Excel (.xlsx) orqali o'quvchilar yuklash; PWA (telefonga o'rnatish); «bugungi darslarim»; har bir o'quvchiga shaxsiy kirish havolasi (`/k/...`).
+
 ## Test
-`npm i && npm test` — toza mahalliy SQLite bazada API testlari (rollar, to'qnashuvlar, baho/davomat, hisobotlar, zaxira-tiklash, xlsx) va eski bazadan migratsiya testi. Test `/tmp/school.db` ni o'zi tozalaydi.
+`npm test` (SQLite bazada, `/tmp/school.db` ni o'zi tozalaydi): rollar, jadval to'qnashuvlari, baho/davomat, o'quvchi/ota-ona hisoblari, nazorat ruxsati, zaxira-tiklash, migratsiya.
 
-## Railway (Hobby) ga joylash
-1. Kodni GitHub'ga yuklang (`node_modules` yuklanmaydi — `.gitignore` da).
-2. Railway → New Project → Deploy from GitHub repo. Start buyrug'i `npm start` (avtomatik aniqlanadi).
-3. Servis → **Volumes** → Add Volume, Mount path: `/data`. (Railway `RAILWAY_VOLUME_MOUNT_PATH` ni o'zi beradi.)
-4. Servis → **Variables**: `SESSION_SECRET` (uzun tasodifiy matn), `ADMIN_PASSWORD` (kamida 8 belgi). `TURSO_*` kerak EMAS.
-5. Settings → Networking → **Generate Domain**. Tekshirish: `<domen>/api/public`.
-6. Kirish: login `admin`, parol — `ADMIN_PASSWORD`. Zaxira: Foydalanuvchilar → «Zaxira nusxa» ni muntazam yuklab oling.
-
-## Yangi imkoniyatlar (v1.1)
-- **Sozlamalar** (administrator): o'quv yili va choraklar, dars vaqtlari (qo'ng'iroq jadvali), baholash turlari va maksimal ballari, zaxira + **tiklash**, audit jurnali.
-- **Davomat dars kesimida**: jurnalda «Dars: 1, 2…» tanlanadi (tanlanmasa eski usul: fan+sana). Mavjud davomat yozuvlari avtomatik `slot=0` bilan ko'chiriladi (migratsiya idempotent).
-- **O'quvchi**: tahrirlash (F.I.Sh., kod, ota-ona aloqasi, sinf, holat) va individual sahifa (fanlar bo'yicha o'rtacha, baholar va davomat tarixi). Sinf o'zgarsa eski baho/davomat eski sinf bilan qoladi.
-- **Hisobotlar**: davomat (davr bo'yicha, kun/hafta/oy/chorak), jurnal to'ldirish holati, sinf natijalari — Excel (.xlsx), CSV va chop etish/PDF.
-- **Bosh sahifa**: bugungi darslar, davomat, so'nggi baholar. O'qituvchi faqat o'zinikini, admin/direktor butun maktabni ko'radi.
-
-## Zaxiradan tiklash
-Sozlamalar → «Zaxira nusxa olish» (JSON). Tiklash: «Zaxiradan tiklash» → fayl → `TIKLASH` deb yozing. Bitta tranzaksiya: xato bo'lsa baza o'zgarmaydi. Xodimlar o'chirilmaydi; parollar zaxiraga kirmaydi, shuning uchun zaxirada bor-u bazada yo'q xodim faolsiz tiklanadi — administrator yangi parol beradi.
-
-## Hozircha mavjud EMAS (rejada)
-Ommaviy sayt va yangiliklar, Excel *import* (o'quvchilar faqat matn orqali qo'shiladi), PDF fayl generatsiyasi (brauzer «Chop etish → PDF»), baho vaznining o'rtachaga ta'siri, yaqinlashayotgan nazorat ishlari kalendari, jadval amal qilish davri, o'quvchi/ota-ona kabineti.
-
-## Ochiq bosh sahifa va hafta/oy o'quvchisi
-- Kirmagan foydalanuvchi ochiq sahifani ko'radi: «Xodimlar kirishi» (login/parol), «O'quvchi va ota-ona» (ma'lumot), maktab ko'rsatkichlari.
-- **Hafta/oy o'quvchisi** — baholangan ishlarning o'rtacha foizi (hafta: kamida 2, oy: kamida 4 baho); davr bo'sh bo'lsa oldingi hafta/oy ko'rsatiladi. Arxivlangan o'quvchilar hisobga olinmaydi.
-- Ochiq sahifada bu reyting **standart o'chiq**. Administrator Sozlamalar'da yoqadi; yoqilganda faqat «Familiya I.» va sinf ko'rinadi. Xodimlar paneli (Bosh sahifa) reytingni to'liq ism bilan, o'z ruxsati doirasida ko'rsatadi.
-- Login: bir IP+login uchun 10 daqiqada 8 ta xato urinishdan keyin vaqtincha bloklanadi (jarayon xotirasida).
-- Testlar: `npm test` (test.js, test-migration.js, test-public.js).
+## Rejada (hali yo'q)
+Chat (ota-ona, o'quvchi, xodim), ota-onaga Telegram xabarlari, dars jadvalining amal qilish muddati, o'quvchi/ota-ona parolini tiklash oqimi, avtomatik zaxira.
