@@ -636,7 +636,7 @@ const effFee = (cls, plan) => { const base = plan && plan.monthly !== null && pl
 r('GET', '/fin/config', async ({ u }) => {
   await needFin(u); const c = await finCfg(), adm = u.role === 'admin';
   const org = Object.fromEntries(['org_name', 'org_inn', 'org_bank', 'org_account', 'org_mfo', 'org_phone', 'org_note'].map(k => [k, c[k] || '']));
-  return { org, min_online: +(c.min_online || 1000), click_on: !!(c.click_service_id && c.click_secret), payme_on: !!(c.payme_merchant_id && c.payme_key),
+  return { org, min_online: +(c.min_online || 1000), click_on: !!(c.click_service_id && c.click_merchant_id && c.click_secret), payme_on: !!(c.payme_merchant_id && c.payme_key),
     ...(adm ? { click: { service_id: c.click_service_id || '', merchant_id: c.click_merchant_id || '', user_id: c.click_user_id || '', secret_set: !!c.click_secret }, payme: { merchant_id: c.payme_merchant_id || '', key_set: !!c.payme_key, test: c.payme_test === '1' }, fin_users: await finUsers() } : {}) };
 });
 r('PUT', '/fin/config', async ({ u, b }) => {
@@ -725,18 +725,19 @@ async function statement(id) {
 }
 r('GET', '/fin/student/(\\d+)', async ({ u, m }) => { await needFin(u); const s = await one('SELECT s.id,s.name,c.name class FROM students s JOIN classes c ON c.id=s.class_id WHERE s.id=?', [+m[1]]); if (!s) bad('Topilmadi', 404); return { student: s, ...(await statement(s.id)) }; });
 // --- o'quvchi/ota-ona kabineti
-const payUrls = async (sid, amount) => {
+const siteOrigin = ev => { const h = ev && ev.headers || {}, host = String(h['x-forwarded-host'] || h.host || '').split(',')[0].trim(), proto = String(h['x-forwarded-proto'] || 'https').split(',')[0].trim() === 'http' ? 'http' : 'https'; return /^[A-Za-z0-9.-]+(:\d{2,5})?$/.test(host) ? proto + '://' + host : ''; };
+const payUrls = async (sid, amount, ret = '') => {
   const c = await finCfg(), out = {};
-  if (c.payme_merchant_id && c.payme_key) out.payme = (c.payme_test === '1' ? 'https://test.paycom.uz/' : 'https://checkout.paycom.uz/') + Buffer.from(`m=${c.payme_merchant_id};ac.student_id=${sid};a=${amount * 100}`).toString('base64');
-  if (c.click_service_id && c.click_merchant_id && c.click_secret) out.click = `https://my.click.uz/services/pay?service_id=${encodeURIComponent(c.click_service_id)}&merchant_id=${encodeURIComponent(c.click_merchant_id)}&amount=${amount}&transaction_param=${sid}`;
+  if (c.payme_merchant_id && c.payme_key) out.payme = (c.payme_test === '1' ? 'https://test.paycom.uz/' : 'https://checkout.paycom.uz/') + Buffer.from(`m=${c.payme_merchant_id};ac.student_id=${sid};a=${amount * 100}${ret ? ';c=' + ret : ''}`).toString('base64');
+  if (c.click_service_id && c.click_merchant_id && c.click_secret) out.click = `https://my.click.uz/services/pay?service_id=${encodeURIComponent(c.click_service_id)}&merchant_id=${encodeURIComponent(c.click_merchant_id)}&amount=${amount}&transaction_param=${sid}${ret ? '&return_url=' + encodeURIComponent(ret) : ''}`;
   return { urls: out, min: +(c.min_online || 1000) };
 };
 r('GET', '/student/billing', async ({ u }) => {
   const c = await finCfg(), st = await statement(u.id), has = !!(await one('SELECT 1 x FROM charges WHERE student_id=?', [u.id]));
   return { ...st, has_billing: has, org: Object.fromEntries(['org_name', 'org_inn', 'org_bank', 'org_account', 'org_mfo', 'org_phone', 'org_note'].map(k => [k, c[k] || ''])), online: { click: !!(c.click_service_id && c.click_merchant_id && c.click_secret), payme: !!(c.payme_merchant_id && c.payme_key), min: +(c.min_online || 1000) } };
 });
-r('POST', '/student/pay-link', async ({ u, b }) => {
-  const a = intAmt(b.amount), p = await payUrls(u.id, a); if (a < p.min) bad(`Minimal summa ${p.min} so'm`); if (a > 1e8) bad("Summa juda katta");
+r('POST', '/student/pay-link', async ({ u, b, ev }) => {
+  const a = intAmt(b.amount), p = await payUrls(u.id, a, siteOrigin(ev)); if (a < p.min) bad(`Minimal summa ${p.min} so'm`); if (a > 1e8) bad("Summa juda katta");
   const url = p.urls[b.provider]; if (!url) bad("Bu to'lov usuli yoqilmagan"); return { url };
 });
 // --- Payme Merchant API (JSON-RPC)
