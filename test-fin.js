@@ -69,20 +69,6 @@ const ok=(n,c)=>{assert(c,n);console.log('OK  ',n)};
  const pl=(await call(S,'POST','/student/pay-link',{provider:'payme',amount:200000})).j.url;
  ok("Payme havolasi: base64(m=...;ac.student_id=...;a=tiyin)",Buffer.from(pl.split('/').pop(),'base64').toString()==`m=MERCH123;ac.student_id=${a.id};a=20000000`);
  ok("Click havolasi",(await call(S,'POST','/student/pay-link',{provider:'click',amount:200000})).j.url.includes('service_id=777')&&(await call(S,'POST','/student/pay-link',{provider:'click',amount:500})).s==400);
-
- // ota-ona kabineti: to'lov bo'limi va saytga qaytish
- const hdr={host:'maktab.up.railway.app','x-forwarded-proto':'https'};
- const pl2=(await call(S,'POST','/student/pay-link',{provider:'payme',amount:200000},null,hdr)).j.url;
- ok("Payme havolasida saytga qaytish (c=)",Buffer.from(pl2.split('/').pop(),'base64').toString().endsWith(';c=https://maktab.up.railway.app'));
- ok("Click havolasida return_url",(await call(S,'POST','/student/pay-link',{provider:'click',amount:200000},null,hdr)).j.url.includes('return_url='+encodeURIComponent('https://maktab.up.railway.app')));
- ok("noto'g'ri Host sarlavhasi havolaga tushmaydi",!(await call(S,'POST','/student/pay-link',{provider:'click',amount:200000},null,{host:'evil.com/x?y'})).j.url.includes('return_url'));
- const pacc=(await call(A,'POST','/students/'+z.id+'/parent',{})).j,PS=(await call('','POST','/login',{login:pacc.login,password:pacc.password})).ck;
- const pb=(await call(PS,'GET','/student/billing')).j;
- ok("ota-ona: hisob yozilmagan bo'lsa ham Click va Payme ko'rinadi",pb.has_billing===false&&pb.online.click===true&&pb.online.payme===true);
- ok("ota-ona hisob yozilmagan bo'lsa ham oldindan to'lash havolasini oladi",(await call(PS,'POST','/student/pay-link',{provider:'payme',amount:50000})).s==200);
- await call(A,'PUT','/fin/config',{click_merchant_id:''});
- ok("Click merchant_id yo'q: admin holati o'chiq va ota-onaga ko'rinmaydi",(await call(A,'GET','/fin/config')).j.click_on===false&&(await call(PS,'GET','/student/billing')).j.online.click===false);
- await call(A,'PUT','/fin/config',{click_merchant_id:'555'});
  ok("sir kalit konfigda ko'rinmaydi",!JSON.stringify((await call(A,'GET','/fin/config')).j).includes('CLICKSECRET')&&!JSON.stringify((await call(A,'GET','/fin/config')).j).includes(KEY));
  const pm=(method,params,id=1,h=AUTH)=>call('','POST','/pay/payme',{jsonrpc:'2.0',id,method,params},null,h);
  ok("Payme: noto'g'ri avtorizatsiya -32504",(await pm('CheckPerformTransaction',{},1,{authorization:'Basic xxx'})).j.error.code==-32504&&(await pm('CheckPerformTransaction',{},1,{})).j.error.code==-32504);

@@ -34,6 +34,17 @@ const SCHEMA = [
 `CREATE UNIQUE INDEX IF NOT EXISTS ux_charge_month ON charges(student_id,period) WHERE kind='oylik'`,
 `CREATE TABLE IF NOT EXISTS payments(id INTEGER PRIMARY KEY,student_id INTEGER NOT NULL REFERENCES students(id),amount INTEGER NOT NULL CHECK(amount>0),method TEXT NOT NULL,paid_on TEXT NOT NULL,note TEXT,ext_id TEXT UNIQUE,status TEXT NOT NULL DEFAULT 'ok',created_by INTEGER,created_at TEXT)`,
 `CREATE TABLE IF NOT EXISTS gateway_tx(id INTEGER PRIMARY KEY,provider TEXT NOT NULL,ext_id TEXT NOT NULL,student_id INTEGER NOT NULL,amount INTEGER NOT NULL,state INTEGER NOT NULL,create_time INTEGER,perform_time INTEGER,cancel_time INTEGER,reason INTEGER,payment_id INTEGER,UNIQUE(provider,ext_id))`,
+`CREATE TABLE IF NOT EXISTS chat_threads(id INTEGER PRIMARY KEY,a TEXT NOT NULL,b TEXT NOT NULL,last_at TEXT,last_text TEXT,UNIQUE(a,b))`,
+`CREATE TABLE IF NOT EXISTS chat_msgs(id INTEGER PRIMARY KEY,thread_id INTEGER NOT NULL,sender TEXT NOT NULL,body TEXT NOT NULL,created_at TEXT NOT NULL)`,
+`CREATE INDEX IF NOT EXISTS ix_cm ON chat_msgs(thread_id,id)`,
+`CREATE TABLE IF NOT EXISTS chat_reports(id INTEGER PRIMARY KEY,msg_id INTEGER NOT NULL,thread_id INTEGER NOT NULL,reporter TEXT NOT NULL,reason TEXT,created_at TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'new',handled_by INTEGER,handled_at TEXT,note TEXT,UNIQUE(msg_id,reporter))`,
+`CREATE TABLE IF NOT EXISTS chat_mutes(party TEXT PRIMARY KEY,until TEXT NOT NULL,reason TEXT,by_user INTEGER,created_at TEXT NOT NULL)`,
+`CREATE TABLE IF NOT EXISTS chat_reads(thread_id INTEGER NOT NULL,party TEXT NOT NULL,last_id INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(thread_id,party))`,
+`CREATE TABLE IF NOT EXISTS tg_config(key TEXT PRIMARY KEY,value TEXT)`,
+`CREATE TABLE IF NOT EXISTS tg_links(chat_id TEXT NOT NULL,student_id INTEGER NOT NULL,created_at TEXT,PRIMARY KEY(chat_id,student_id))`,
+`CREATE TABLE IF NOT EXISTS remind_log(student_id INTEGER PRIMARY KEY,sent_on TEXT NOT NULL)`,
+`CREATE TABLE IF NOT EXISTS reset_codes(login TEXT PRIMARY KEY,code TEXT NOT NULL,exp INTEGER NOT NULL,tries INTEGER NOT NULL DEFAULT 0)`,
+`CREATE TABLE IF NOT EXISTS tg_codes(code TEXT PRIMARY KEY,student_id INTEGER NOT NULL,exp INTEGER NOT NULL)`,
 `CREATE TABLE IF NOT EXISTS audit_logs(id INTEGER PRIMARY KEY,user_id INTEGER,action TEXT,entity TEXT,entity_id TEXT,old TEXT,new TEXT,at TEXT)`,
 `CREATE TABLE IF NOT EXISTS academic_years(id INTEGER PRIMARY KEY,name TEXT UNIQUE NOT NULL,start_date TEXT NOT NULL,end_date TEXT NOT NULL,is_current INTEGER NOT NULL DEFAULT 0)`,
 `CREATE TABLE IF NOT EXISTS terms(id INTEGER PRIMARY KEY,year_id INTEGER NOT NULL REFERENCES academic_years(id),name TEXT NOT NULL,start_date TEXT NOT NULL,end_date TEXT NOT NULL,UNIQUE(year_id,name))`,
@@ -55,6 +66,9 @@ const init = () => ready || (ready = (async () => {
       `INSERT INTO attendance_new(id,student_id,class_id,subject_id,date,slot,status,note) SELECT id,student_id,class_id,subject_id,date,0,status,note FROM attendance`,
       `DROP TABLE attendance`, `ALTER TABLE attendance_new RENAME TO attendance`, `CREATE INDEX IF NOT EXISTS ix_a ON attendance(class_id,date)`], 'write');
   if (!(await q('PRAGMA table_info(timetable)')).some(c => c.name === 'slot')) await run('ALTER TABLE timetable ADD COLUMN slot INTEGER'); // dars raqami (1-dars, 2-dars ...): mavjud darslar vaqti bo'yicha avtomatik bog'lanadi
+  if (!(await q('PRAGMA table_info(classes)')).some(x => x.name === 'archived')) await run('ALTER TABLE classes ADD COLUMN archived INTEGER NOT NULL DEFAULT 0'); // o'quv yili tugagan sinf arxivga o'tadi
+  for (const c of ['del_at', 'del_by']) if (!(await q('PRAGMA table_info(chat_msgs)')).some(x => x.name === c)) await run(`ALTER TABLE chat_msgs ADD COLUMN ${c} TEXT`); // chat: xabar o'chirilsa yozuv saqlanadi (shikoyat dalili), foydalanuvchiga ko'rinmaydi
+  for (const c of ['valid_from', 'valid_to']) if (!(await q('PRAGMA table_info(timetable)')).some(x => x.name === c)) await run(`ALTER TABLE timetable ADD COLUMN ${c} TEXT`); // jadval versiyasi: dars shu sanalar oralig'ida amal qiladi (NULL = chegarasiz)
   await mapSlots();
   await run(`INSERT OR IGNORE INTO settings VALUES('school_name','Deutsch School MCHJ')`);
   if (!(await one('SELECT id FROM users LIMIT 1')) && process.env.ADMIN_PASSWORD)
@@ -83,9 +97,14 @@ const hhmm = s => /^([01]\d|2[0-3]):[0-5]\d$/.test(s || '') || bad('Vaqt formati
 
 // Vaqti qo'ng'iroq jadvalidagi darsga aynan mos keladigan, lekin raqami yo'q darslarga raqam beradi
 async function mapSlots() { await run('UPDATE timetable SET slot=(SELECT no FROM bell_slots b WHERE b.start=timetable.start AND b.end=timetable.end) WHERE slot IS NULL'); }
+// Amal qilish oralig'i kesishgan darslargina to'qnashadi (eski va yangi versiya bir-biriga xalaqit bermaydi)
+const OVL = ' AND (t.valid_from IS NULL OR ? IS NULL OR t.valid_from<=?) AND (? IS NULL OR t.valid_to IS NULL OR ?<=t.valid_to)';
+const dAdd = (d, n) => { const x = new Date(d + 'T12:00:00Z'); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
+const ACT = (a = 't.') => `(${a}valid_from IS NULL OR ${a}valid_from<=?) AND (${a}valid_to IS NULL OR ${a}valid_to>=?)`; // berilgan sanada amalda (2 ta parametr: sana, sana)
 async function conflict(b, skip = 0) {
-  const base = 'SELECT t.*,c.name cn,u.name un FROM timetable t JOIN classes c ON c.id=t.class_id JOIN users u ON u.id=t.teacher_id WHERE t.weekday=? AND t.start<? AND t.end>? AND t.id!=?';
-  for (const r of await q(base, [b.weekday, b.end, b.start, skip])) {
+  const base = 'SELECT t.*,c.name cn,u.name un FROM timetable t JOIN classes c ON c.id=t.class_id JOIN users u ON u.id=t.teacher_id WHERE t.weekday=? AND t.start<? AND t.end>? AND t.id!=?' + OVL;
+  const vf = b.vf || null, vt = b.vt || null;
+  for (const r of await q(base, [b.weekday, b.end, b.start, skip, vt, vt, vf, vf])) {
     if (r.teacher_id == b.teacher_id) bad(`To'qnashuv: ${r.un} ${r.start}–${r.end} da ${r.cn} sinfida darsi bor`, 409);
     if (r.class_id == b.class_id) bad(`To'qnashuv: ${r.cn} sinfida ${r.start}–${r.end} da boshqa dars bor`, 409);
     if (b.room && r.room && r.room === b.room) bad(`To'qnashuv: ${b.room}-xona ${r.start}–${r.end} da band`, 409);
@@ -196,9 +215,12 @@ r('PATCH', '/users/(\\d+)', async ({ u, b, m }) => {
 
 r('GET', '/subjects', async () => q('SELECT * FROM subjects ORDER BY name'));
 r('POST', '/subjects', async ({ u, b }) => { need(u, 'admin'); if (!b.name) bad('Fan nomi kerak'); await run('INSERT OR IGNORE INTO subjects(name) VALUES(?)', [b.name.trim()]); return { ok: 1 }; });
-r('GET', '/classes', async ({ u }) => q(u.role === 'teacher'
-  ? 'SELECT DISTINCT c.*,(SELECT name FROM users WHERE id=c.homeroom_id) homeroom FROM classes c LEFT JOIN assignments a ON a.class_id=c.id WHERE c.homeroom_id=? OR a.teacher_id=? ORDER BY c.name'
-  : 'SELECT c.*,(SELECT name FROM users WHERE id=c.homeroom_id) homeroom FROM classes c ORDER BY c.name', u.role === 'teacher' ? [u.id, u.id] : []));
+r('GET', '/classes', async ({ u, qs }) => { // standart: faqat joriy (arxivlanmagan) sinflar; ?archived=only: arxiv sinflar
+  const ar = qs.archived === 'only' ? 1 : 0;
+  return q(u.role === 'teacher'
+    ? 'SELECT DISTINCT c.*,(SELECT name FROM users WHERE id=c.homeroom_id) homeroom FROM classes c LEFT JOIN assignments a ON a.class_id=c.id WHERE c.archived=? AND (c.homeroom_id=? OR a.teacher_id=?) ORDER BY c.year DESC,c.name'
+    : 'SELECT c.*,(SELECT name FROM users WHERE id=c.homeroom_id) homeroom FROM classes c WHERE c.archived=? ORDER BY c.year DESC,c.name', u.role === 'teacher' ? [ar, u.id, u.id] : [ar]);
+});
 r('POST', '/classes', async ({ u, b }) => {
   need(u, 'admin'); if (!b.name || !b.year) bad('Sinf nomi va o\'quv yili kerak');
   try { const x = await run('INSERT INTO classes(name,year,homeroom_id) VALUES(?,?,?)', [b.name.trim(), b.year.trim(), b.homeroom_id || null]); await audit(u, 'create', 'class', x.lastInsertRowid, null, b); return { id: Number(x.lastInsertRowid) }; }
@@ -243,7 +265,7 @@ r('DELETE', '/students/(\\d+)', async ({ u, m }) => {
   if (!(await homeroom(u, s.class_id))) bad('Ruxsat yo\'q', 403);
   const g = await q('SELECT * FROM grades WHERE student_id=?', [s.id]), a = await q('SELECT * FROM attendance WHERE student_id=?', [s.id]);
   await db.batch([{ sql: 'DELETE FROM grades WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM attendance WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM student_accounts WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM parent_accounts WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM admission_resets WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM period_grades WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM access_links WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM fee_plans WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM charges WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM gateway_tx WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM payments WHERE student_id=?', args: [s.id] }, { sql: 'DELETE FROM students WHERE id=?', args: [s.id] }], 'write');
-  await audit(u, 'delete', 'student', s.id, { student: s, grades: g, attendance: a }, null); return { ok: 1, grades: g.length, attendance: a.length };
+  await chatPurge(s.id); await audit(u, 'delete', 'student', s.id, { student: s, grades: g, attendance: a }, null); return { ok: 1, grades: g.length, attendance: a.length };
 });
 // ===== O'quvchi hisoblari (login/parol): admin va sinf rahbari beradi; parol faqat yaratilganda bir marta ko'rsatiladi =====
 const PWA = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
@@ -327,7 +349,7 @@ const newsFor = async u => { const a = AUD[u.role] || ['all']; return q(`SELECT 
 r('GET', '/announcements', async ({ u }) => newsFor(u));
 r('GET', '/student/news', async ({ u }) => { needS(u); return newsFor(u); });
 const newsIn = b => { const t = String(b.title || '').trim(), body = String(b.body || '').trim(), aud = b.audience || 'all'; if (!t || t.length > 150) bad("Sarlavha 1–150 belgi bo'lsin"); if (!body || body.length > 4000) bad("Matn 1–4000 belgi bo'lsin"); if (!AUD.admin.includes(aud)) bad("Noto'g'ri auditoriya"); return [t, body, aud, b.pinned ? 1 : 0]; };
-r('POST', '/announcements', async ({ u, b }) => { need(u, 'admin', 'director'); const v = newsIn(b); const x = await run('INSERT INTO announcements(title,body,audience,pinned,author_id,created_at) VALUES(?,?,?,?,?,?)', [...v, u.id, now()]); await audit(u, 'create', 'announcement', Number(x.lastInsertRowid), null, { title: v[0] }); return { id: Number(x.lastInsertRowid) }; });
+r('POST', '/announcements', async ({ u, b }) => { need(u, 'admin', 'director'); const v = newsIn(b); const x = await run('INSERT INTO announcements(title,body,audience,pinned,author_id,created_at) VALUES(?,?,?,?,?,?)', [...v, u.id, now()]); tgAnn(v[0], v[1], v[2]); await audit(u, 'create', 'announcement', Number(x.lastInsertRowid), null, { title: v[0] }); return { id: Number(x.lastInsertRowid) }; });
 r('PUT', '/announcements/(\\d+)', async ({ u, b, m }) => { need(u, 'admin', 'director'); if (!(await one('SELECT 1 x FROM announcements WHERE id=?', [+m[1]]))) bad('Topilmadi', 404); await run('UPDATE announcements SET title=?,body=?,audience=?,pinned=? WHERE id=?', [...newsIn(b), +m[1]]); await audit(u, 'update', 'announcement', +m[1], null, null); return { ok: 1 }; });
 r('DELETE', '/announcements/(\\d+)', async ({ u, m }) => { need(u, 'admin', 'director'); await run('DELETE FROM announcements WHERE id=?', [+m[1]]); await audit(u, 'delete', 'announcement', +m[1], null, null); return { ok: 1 }; });
 // ===== Nazorat imtihoniga ruxsat: so'nggi N kunda uzrsiz ('kelmadi') darslar soni chegaradan oshsa ruxsat yo'q =====
@@ -368,7 +390,7 @@ r('GET', '/student/overview', async ({ u }) => {
     student: s, role: u.role, finals: await q('SELECT p.kind,p.term_id,p.value,sb.name subject,t.name term FROM period_grades p JOIN subjects sb ON sb.id=p.subject_id LEFT JOIN terms t ON t.id=p.term_id WHERE p.student_id=? ORDER BY sb.name', [u.id]), admission: await admission('AND a.student_id=?', [u.id]),
     grades: await q('SELECT x.date,x.type,x.value,x.max,x.comment,x.subject_id,sb.name subject FROM grades x JOIN subjects sb ON sb.id=x.subject_id WHERE x.student_id=? ORDER BY x.date DESC,x.id DESC LIMIT 600', [u.id]),
     attendance: await q('SELECT x.date,x.status,x.note,sb.name subject FROM attendance x JOIN subjects sb ON sb.id=x.subject_id WHERE x.student_id=? ORDER BY x.date DESC LIMIT 600', [u.id]),
-    timetable: await q('SELECT t.id,t.class_id,t.subject_id,t.weekday,t.start,t.end,t.room,t.slot,c.name class,sb.name subject,us.name teacher FROM timetable t JOIN classes c ON c.id=t.class_id JOIN subjects sb ON sb.id=t.subject_id JOIN users us ON us.id=t.teacher_id WHERE t.class_id=? ORDER BY t.weekday,COALESCE(t.slot,99),t.start', [s.class_id]),
+    timetable: await q('SELECT t.id,t.class_id,t.subject_id,t.weekday,t.start,t.end,t.room,t.slot,c.name class,sb.name subject,us.name teacher FROM timetable t JOIN classes c ON c.id=t.class_id JOIN subjects sb ON sb.id=t.subject_id JOIN users us ON us.id=t.teacher_id WHERE t.class_id=? AND ' + ACT() + ' ORDER BY t.weekday,COALESCE(t.slot,99),t.start', [s.class_id, tashkentToday(), tashkentToday()]),
     slots: await q('SELECT no,start,end FROM bell_slots ORDER BY no'),
     lessons: await q('SELECT l.date,sb.name subject,l.topic,l.homework FROM lessons l JOIN subjects sb ON sb.id=l.subject_id WHERE l.class_id=? AND l.date>=? AND (COALESCE(l.topic,\'\')!=\'\' OR COALESCE(l.homework,\'\')!=\'\') ORDER BY l.date DESC LIMIT 120', [s.class_id, since])
   };
@@ -449,6 +471,7 @@ r('GET', '/timetable', async ({ u, qs }) => {
   if (qs.class_id) { w.push('t.class_id=?'); a.push(+qs.class_id); }
   if (qs.teacher_id) { w.push('t.teacher_id=?'); a.push(+qs.teacher_id); }
   if (qs.weekday) { w.push('t.weekday=?'); a.push(+qs.weekday); }
+  if (!qs.all) { const d = qs.date || tashkentToday(); dateOk(d); w.push(ACT()); a.push(d, d); } // standart: bugun amaldagi versiya; ?date=YYYY-MM-DD yoki ?all=1
   return q(`SELECT t.*,c.name class,s.name subject,u.name teacher FROM timetable t JOIN classes c ON c.id=class_id JOIN subjects s ON s.id=subject_id JOIN users u ON u.id=teacher_id ${w.length ? 'WHERE ' + w.join(' AND ') : ''} ORDER BY weekday,COALESCE(slot,99),start`, a);
 });
 const ttSave = async (u, b, id) => {
@@ -460,10 +483,22 @@ const ttSave = async (u, b, id) => {
   if (slot) { const s = await one('SELECT * FROM bell_slots WHERE no=?', [slot]); if (!s) bad(`${slot}-dars vaqti sozlanmagan (Dars jadvali → Qo'ng'iroqlar)`); b.start = s.start; b.end = s.end; }
   hhmm(b.start); hhmm(b.end); if (b.start >= b.end) bad('Tugash vaqti boshlanishdan keyin bo\'lishi kerak');
   if (!slot) slot = (await one('SELECT no FROM bell_slots WHERE start=? AND end=?', [b.start, b.end]) || {}).no || null;
-  await conflict(b, id || 0);
+  const eff = b.effective ? String(b.effective) : null; if (eff) dateOk(eff);
   const room = String(b.room || '').trim().slice(0, 20) || null;
-  if (id) { await run('UPDATE timetable SET class_id=?,subject_id=?,teacher_id=?,weekday=?,start=?,end=?,room=?,slot=? WHERE id=?', [b.class_id, b.subject_id, b.teacher_id, b.weekday, b.start, b.end, room, slot, id]); await audit(u, 'update', 'timetable', id, null, { class_id: b.class_id, subject_id: b.subject_id, weekday: b.weekday, slot }); return { id }; }
-  const x = await run('INSERT INTO timetable(class_id,subject_id,teacher_id,weekday,start,end,room,slot) VALUES(?,?,?,?,?,?,?,?)', [b.class_id, b.subject_id, b.teacher_id, b.weekday, b.start, b.end, room, slot]);
+  if (id) {
+    const old = await one('SELECT * FROM timetable WHERE id=?', [id]); if (!old) bad('Topilmadi', 404);
+    if (eff && !(old.valid_from && old.valid_from >= eff)) { // eski versiya tarixga qoladi, o'zgarish eff sanasidan boshlanadi
+      if (eff < tashkentToday()) bad("Kuchga kirish sanasi o'tmishda bo'lishi mumkin emas: o'tgan davomat va jurnal o'zgarib ketadi", 400);
+      if (old.valid_to && old.valid_to < eff) bad("Bu dars shu sanada amalda emas (" + old.valid_to + " gacha edi)", 400);
+      b.vf = eff; b.vt = old.valid_to || null; await conflict(b, id);
+      const st = [{ sql: 'UPDATE timetable SET valid_to=? WHERE id=?', args: [dAdd(eff, -1), id] }, { sql: 'INSERT INTO timetable(class_id,subject_id,teacher_id,weekday,start,end,room,slot,valid_from,valid_to) VALUES(?,?,?,?,?,?,?,?,?,?)', args: [b.class_id, b.subject_id, b.teacher_id, b.weekday, b.start, b.end, room, slot, eff, b.vt] }];
+      const rs = await db.batch(st, 'write'); const nid = Number(rs[1].lastInsertRowid);
+      await audit(u, 'version', 'timetable', id, { valid_to: old.valid_to }, { new_id: nid, from: eff, weekday: b.weekday, slot }); return { id: nid, versioned: true, from: eff };
+    }
+    b.vf = old.valid_from || null; b.vt = old.valid_to || null; await conflict(b, id);
+    await run('UPDATE timetable SET class_id=?,subject_id=?,teacher_id=?,weekday=?,start=?,end=?,room=?,slot=? WHERE id=?', [b.class_id, b.subject_id, b.teacher_id, b.weekday, b.start, b.end, room, slot, id]); await audit(u, 'update', 'timetable', id, null, { class_id: b.class_id, subject_id: b.subject_id, weekday: b.weekday, slot }); return { id }; }
+  b.vf = eff; b.vt = null; await conflict(b, 0);
+  const x = await run('INSERT INTO timetable(class_id,subject_id,teacher_id,weekday,start,end,room,slot,valid_from) VALUES(?,?,?,?,?,?,?,?,?)', [b.class_id, b.subject_id, b.teacher_id, b.weekday, b.start, b.end, room, slot, eff]);
   // sinf+fan uchun o'qituvchi hali biriktirilmagan bo'lsa, jurnal ruxsati ishlashi uchun avtomatik biriktiriladi
   const had = await one('SELECT 1 x FROM assignments WHERE class_id=? AND subject_id=?', [b.class_id, b.subject_id]);
   if (!had) { await run('INSERT INTO assignments(class_id,subject_id,teacher_id) VALUES(?,?,?)', [b.class_id, b.subject_id, b.teacher_id]); await audit(u, 'assign', 'assignment', `${b.class_id}-${b.subject_id}`, null, { teacher_id: b.teacher_id, auto: 1 }); }
@@ -472,7 +507,30 @@ const ttSave = async (u, b, id) => {
 };
 r('POST', '/timetable', async ({ u, b }) => ttSave(u, b));
 r('PUT', '/timetable/(\\d+)', async ({ u, b, m }) => ttSave(u, b, +m[1]));
-r('DELETE', '/timetable/(\\d+)', async ({ u, m }) => { need(u, 'admin'); await run('DELETE FROM timetable WHERE id=?', [+m[1]]); return { ok: 1 }; });
+// O'chirish: effective berilsa dars shu sanadan boshlab yo'qoladi (tarix saqlanadi); bermasa va dars hali boshlanmagan/chegarasiz bo'lsa to'liq o'chadi
+r('DELETE', '/timetable/(\\d+)', async ({ u, m, qs, b }) => {
+  need(u, 'admin'); const o = await one('SELECT * FROM timetable WHERE id=?', [+m[1]]); if (!o) bad('Topilmadi', 404);
+  const eff = qs.effective || (b && b.effective) || null;
+  if (!eff) { await run('DELETE FROM timetable WHERE id=?', [o.id]); await audit(u, 'delete', 'timetable', o.id, o, null); return { ok: 1 }; }
+  dateOk(eff); if (eff < tashkentToday()) bad("Kuchga kirish sanasi o'tmishda bo'lishi mumkin emas", 400);
+  if (o.valid_from && o.valid_from >= eff) await run('DELETE FROM timetable WHERE id=?', [o.id]);
+  else if (o.valid_to && o.valid_to < eff) bad("Bu dars shu sanada allaqachon amalda emas", 400);
+  else await run('UPDATE timetable SET valid_to=? WHERE id=?', [dAdd(eff, -1), o.id]);
+  await audit(u, 'end', 'timetable', o.id, o, { effective: eff }); return { ok: 1, ended_from: eff };
+});
+// Yangi versiya (masalan, yangi semestr): amaldagi jadval 'from' sanasidan boshlab nusxalanadi, eskisi 'from' dan oldin tugaydi. So'ng yangi nusxani erkin tahrirlash mumkin.
+r('POST', '/timetable/version', async ({ u, b }) => {
+  need(u, 'admin'); const from = String(b.from || ''); dateOk(from); if (from < tashkentToday()) bad("Yangi versiya sanasi o'tmishda bo'lishi mumkin emas", 400);
+  const cls = +b.class_id || 0, rows = await q(`SELECT * FROM timetable t WHERE ${ACT()} AND (t.valid_from IS NULL OR t.valid_from<?)${cls ? ' AND t.class_id=?' : ''}`, [from, from, from, ...(cls ? [cls] : [])]);
+  if (!rows.length) bad("Bu sanada amaldagi dars yo'q: nusxalash uchun jadval kerak", 400);
+  const st = []; for (const x of rows) st.push({ sql: 'UPDATE timetable SET valid_to=? WHERE id=?', args: [dAdd(from, -1), x.id] }, { sql: 'INSERT INTO timetable(class_id,subject_id,teacher_id,weekday,start,end,room,slot,valid_from,valid_to) VALUES(?,?,?,?,?,?,?,?,?,?)', args: [x.class_id, x.subject_id, x.teacher_id, x.weekday, x.start, x.end, x.room, x.slot, from, x.valid_to] });
+  await db.batch(st, 'write'); await audit(u, 'version', 'timetable', '-', null, { from, copied: rows.length, class_id: cls || null }); return { ok: 1, copied: rows.length, from };
+});
+// Versiyalar ro'yxati: har bir boshlanish sanasi va shu sanadan boshlanadigan darslar soni
+r('GET', '/timetable/versions', async ({ u }) => {
+  need(u, 'admin', 'director'); const today = tashkentToday();
+  return { today, versions: await q("SELECT COALESCE(valid_from,'') from_date,COUNT(*) n FROM timetable GROUP BY valid_from ORDER BY valid_from"), ends: await q('SELECT valid_to to_date,COUNT(*) n FROM timetable WHERE valid_to IS NOT NULL GROUP BY valid_to ORDER BY valid_to') };
+});
 
 r('GET', '/journal', async ({ u, qs }) => {
   const c = +qs.class_id, s = +qs.subject_id; if (!c || !s) bad('class_id va subject_id kerak');
@@ -480,11 +538,13 @@ r('GET', '/journal', async ({ u, qs }) => {
   const p = [c, s];
   return {
     can_edit: await teaches(u, c, s),
-    students: await q("SELECT id,name,code FROM students WHERE class_id=? AND status='faol' ORDER BY name", [c]),
+    students: (await one('SELECT archived FROM classes WHERE id=?', [c])).archived // arxiv sinf: baho/davomati bor o'quvchilar (boshqa sinfga o'tgan yoki bitirganlar ham) ko'rinadi
+      ? await q('SELECT id,name,code,1 moved FROM students WHERE id IN(SELECT student_id FROM grades WHERE class_id=? UNION SELECT student_id FROM attendance WHERE class_id=?) ORDER BY name', [c, c])
+      : await q("SELECT id,name,code FROM students WHERE class_id=? AND status='faol' ORDER BY name", [c]),
     grades: await q('SELECT student_id,date,type,value,max,comment FROM grades WHERE class_id=? AND subject_id=?', p),
     attendance: await q('SELECT student_id,date,slot,status,note FROM attendance WHERE class_id=? AND subject_id=?', p),
     lessons: await q('SELECT date,topic,homework,note FROM lessons WHERE class_id=? AND subject_id=? ORDER BY date DESC LIMIT 500', p),
-    schedule: await q('SELECT DISTINCT weekday,COALESCE(slot,0) slot FROM timetable WHERE class_id=? AND subject_id=? ORDER BY weekday,slot', p), // jurnal ustunlari dars jadvaliga mos
+    schedule: await q('SELECT DISTINCT weekday,COALESCE(slot,0) slot,valid_from vf,valid_to vt FROM timetable WHERE class_id=? AND subject_id=? ORDER BY weekday,slot', p), // jurnal ustunlari dars jadvaliga mos
     terms: await q('SELECT t.name,t.start_date,t.end_date,y.name year,y.is_current FROM terms t JOIN academic_years y ON y.id=t.year_id ORDER BY t.start_date')
   };
 });
@@ -498,7 +558,7 @@ r('PUT', '/grades', async ({ u, b }) => {
   }
   const max = +b.max || 5, v = +b.value; if (!(v >= 0 && v <= max)) bad(`Baho 0 dan ${max} gacha bo'lishi kerak`);
   await run('INSERT INTO grades(student_id,class_id,subject_id,teacher_id,date,type,value,max,comment) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(student_id,subject_id,date,type) DO UPDATE SET value=excluded.value,max=excluded.max,comment=excluded.comment,teacher_id=excluded.teacher_id', [sid, c, s, u.id, date, type, v, max, b.comment || null]);
-  await audit(u, old ? 'update' : 'create', 'grade', `${sid}-${s}-${date}-${type}`, old && { value: old.value, max: old.max }, { value: v, max }); return { ok: 1 };
+  await audit(u, old ? 'update' : 'create', 'grade', `${sid}-${s}-${date}-${type}`, old && { value: old.value, max: old.max }, { value: v, max }); if (!old || old.value !== v) tgGrade(sid, s, date, v, max, type); return { ok: 1 };
 });
 r('PUT', '/attendance', async ({ u, b }) => {
   const { student_id: sid, class_id: c, subject_id: sj, date } = b; dateOk(date);
@@ -508,7 +568,8 @@ r('PUT', '/attendance', async ({ u, b }) => {
   if (!b.status) { if (old) { await run('DELETE FROM attendance WHERE id=?', [old.id]); await audit(u, 'delete', 'attendance', old.id, old, null); } return { ok: 1 }; }
   if (!ST.includes(b.status)) bad('Noto\'g\'ri holat');
   await run('INSERT INTO attendance(student_id,class_id,subject_id,date,slot,status,note) VALUES(?,?,?,?,?,?,?) ON CONFLICT(student_id,subject_id,date,slot) DO UPDATE SET status=excluded.status,note=excluded.note', [sid, c, sj, date, slot, b.status, b.note || null]);
-  await audit(u, old ? 'update' : 'create', 'attendance', `${sid}-${sj}-${date}-${slot}`, old && { status: old.status, note: old.note }, { status: b.status, note: b.note || null }); return { ok: 1 };
+  await audit(u, old ? 'update' : 'create', 'attendance', `${sid}-${sj}-${date}-${slot}`, old && { status: old.status, note: old.note }, { status: b.status, note: b.note || null });
+  if (b.status !== (old && old.status) && (b.status === 'kelmadi' || b.status === 'kechikdi')) tgAbs(sid, sj, date, b.status); return { ok: 1 };
 });
 r('PUT', '/lessons', async ({ u, b }) => {
   const { class_id: c, subject_id: s, date } = b; dateOk(date); if (!(await teaches(u, c, s))) bad('Ruxsatingiz yo\'q', 403);
@@ -548,12 +609,12 @@ r('GET', '/reports/attendance', async ({ u, qs }) => { // sinf bo'yicha davomat:
 r('GET', '/reports/journal_fill', async ({ u, qs }) => { // o'qituvchi jadvalidagi darslar va ularning mavzusi kiritilganlik holati
   need(u, 'admin', 'director', 'teacher'); rangeOk(qs);
   const tid = u.role === 'teacher' ? u.id : (+qs.teacher_id || 0);
-  const tt = await q(`SELECT t.class_id,t.subject_id,t.teacher_id,t.weekday,c.name class,s.name subject,us.name teacher FROM timetable t JOIN classes c ON c.id=t.class_id JOIN subjects s ON s.id=t.subject_id JOIN users us ON us.id=t.teacher_id${tid ? ' WHERE t.teacher_id=?' : ''}`, tid ? [tid] : []);
+  const tt = await q(`SELECT t.class_id,t.subject_id,t.teacher_id,t.weekday,t.valid_from,t.valid_to,c.name class,s.name subject,us.name teacher FROM timetable t JOIN classes c ON c.id=t.class_id JOIN subjects s ON s.id=t.subject_id JOIN users us ON us.id=t.teacher_id${tid ? ' WHERE t.teacher_id=?' : ''}`, tid ? [tid] : []);
   const done = new Set((await q("SELECT class_id,subject_id,date FROM lessons WHERE date BETWEEN ? AND ? AND trim(coalesce(topic,''))!=''", [qs.from, qs.to])).map(x => `${x.class_id}|${x.subject_id}|${x.date}`));
   const planned = new Set(), by = {}; const end = Date.parse(qs.to + 'T12:00:00Z');
   for (let t = Date.parse(qs.from + 'T12:00:00Z'); t <= end; t += 864e5) {
     const d = new Date(t).toISOString().slice(0, 10), w = new Date(t).getUTCDay() || 7;
-    for (const x of tt) if (x.weekday === w) {
+    for (const x of tt) if (x.weekday === w && (!x.valid_from || x.valid_from <= d) && (!x.valid_to || x.valid_to >= d)) {
       const k = `${x.class_id}|${x.subject_id}|${d}|${x.teacher_id}`; if (planned.has(k)) continue; planned.add(k);
       const g = by[x.teacher_id] ??= { teacher_id: x.teacher_id, teacher: x.teacher, planned: 0, filled: 0 };
       g.planned++; if (done.has(`${x.class_id}|${x.subject_id}|${d}`)) g.filled++;
@@ -636,7 +697,7 @@ const effFee = (cls, plan) => { const base = plan && plan.monthly !== null && pl
 r('GET', '/fin/config', async ({ u }) => {
   await needFin(u); const c = await finCfg(), adm = u.role === 'admin';
   const org = Object.fromEntries(['org_name', 'org_inn', 'org_bank', 'org_account', 'org_mfo', 'org_phone', 'org_note'].map(k => [k, c[k] || '']));
-  return { org, min_online: +(c.min_online || 1000), click_on: !!(c.click_service_id && c.click_merchant_id && c.click_secret), payme_on: !!(c.payme_merchant_id && c.payme_key),
+  return { org, remind_day: +(c.remind_day || 0), remind_min: +(c.remind_min || 0), min_online: +(c.min_online || 1000), click_on: !!(c.click_service_id && c.click_secret), payme_on: !!(c.payme_merchant_id && c.payme_key),
     ...(adm ? { click: { service_id: c.click_service_id || '', merchant_id: c.click_merchant_id || '', user_id: c.click_user_id || '', secret_set: !!c.click_secret }, payme: { merchant_id: c.payme_merchant_id || '', key_set: !!c.payme_key, test: c.payme_test === '1' }, fin_users: await finUsers() } : {}) };
 });
 r('PUT', '/fin/config', async ({ u, b }) => {
@@ -645,6 +706,8 @@ r('PUT', '/fin/config', async ({ u, b }) => {
   for (const k of ['click_service_id', 'click_merchant_id', 'click_user_id', 'payme_merchant_id']) if (b[k] !== undefined) { const v = String(b[k]).trim().slice(0, 100); if (v && !/^[A-Za-z0-9_-]+$/.test(v)) bad(k + " noto'g'ri belgilar"); await finSet(k, v || null); }
   for (const k of ['click_secret', 'payme_key']) if (b[k]) await finSet(k, String(b[k]).trim().slice(0, 200)); else if (b['clear_' + k]) await finSet(k, null); // bo'sh yuborilsa mavjud kalit saqlanadi
   if (b.payme_test !== undefined) await finSet('payme_test', b.payme_test ? '1' : '0');
+  if (b.remind_day !== undefined) { const d = +b.remind_day; if (!Number.isInteger(d) || d < 0 || d > 28) bad("Eslatma kuni 0 (o'chiq) yoki 1–28 bo'lsin"); await finSet('remind_day', d); }
+  if (b.remind_min !== undefined) { const m = intAmt(b.remind_min, 'Minimal qarz'); if (m < 0 || m > 1e9) bad("Minimal qarz noto'g'ri"); await finSet('remind_min', m); }
   if (b.min_online !== undefined) { const m = intAmt(b.min_online, 'Minimal summa'); if (m < 1 || m > 1e7) bad("Minimal summa 1 dan 10 000 000 gacha"); await finSet('min_online', m); }
   if (b.fin_users !== undefined) { const ids = [...new Set((Array.isArray(b.fin_users) ? b.fin_users : []).map(Number).filter(Number.isInteger))]; const ok = (await q("SELECT id FROM users WHERE role='teacher' AND is_active=1")).map(x => x.id); await finSet('fin_users', JSON.stringify(ids.filter(i => ok.includes(i)))); }
   await audit(u, 'update', 'fin_config', '-', null, { keys: Object.keys(b).filter(k => !/secret|key/.test(k)) }); return { ok: 1 };
@@ -683,7 +746,8 @@ r('POST', '/fin/charges', async ({ u, b }) => {
 });
 r('DELETE', '/fin/charges/(\\d+)', async ({ u, m }) => { await needFin(u); const o = await one('SELECT * FROM charges WHERE id=?', [+m[1]]); if (!o) bad('Topilmadi', 404); await run('DELETE FROM charges WHERE id=?', [o.id]); await audit(u, 'delete', 'charge', o.id, o, null); return { ok: 1 }; });
 // --- to'lovlar
-const payIns = (sid, amount, method, paid_on, note, by, ext) => run("INSERT INTO payments(student_id,amount,method,paid_on,note,ext_id,status,created_by,created_at) VALUES(?,?,?,?,?,?,'ok',?,?)", [sid, amount, method, paid_on, note || null, ext || null, by || null, now()]);
+const payIns = async (sid, amount, method, paid_on, note, by, ext) => { const x = await payIns0(sid, amount, method, paid_on, note, by, ext); tgPay(sid, amount); return x; };
+const payIns0 = (sid, amount, method, paid_on, note, by, ext) => run("INSERT INTO payments(student_id,amount,method,paid_on,note,ext_id,status,created_by,created_at) VALUES(?,?,?,?,?,?,'ok',?,?)", [sid, amount, method, paid_on, note || null, ext || null, by || null, now()]);
 r('POST', '/fin/payments', async ({ u, b }) => {
   await needFin(u); const id = +b.student_id, a = intAmt(b.amount); if (a <= 0) bad("Summa 0 dan katta bo'lsin"); if (!(await one('SELECT 1 x FROM students WHERE id=?', [id]))) bad('Topilmadi', 404);
   const me = String(b.method || 'naqd'); if (!PMETH.includes(me)) bad("To'lov turi noto'g'ri"); const dt = b.paid_on ? String(b.paid_on) : tashkentToday(); if (!DATE.test(dt) || dt > tashkentToday()) bad("Sana noto'g'ri yoki kelajakda");
@@ -725,19 +789,18 @@ async function statement(id) {
 }
 r('GET', '/fin/student/(\\d+)', async ({ u, m }) => { await needFin(u); const s = await one('SELECT s.id,s.name,c.name class FROM students s JOIN classes c ON c.id=s.class_id WHERE s.id=?', [+m[1]]); if (!s) bad('Topilmadi', 404); return { student: s, ...(await statement(s.id)) }; });
 // --- o'quvchi/ota-ona kabineti
-const siteOrigin = ev => { const h = ev && ev.headers || {}, host = String(h['x-forwarded-host'] || h.host || '').split(',')[0].trim(), proto = String(h['x-forwarded-proto'] || 'https').split(',')[0].trim() === 'http' ? 'http' : 'https'; return /^[A-Za-z0-9.-]+(:\d{2,5})?$/.test(host) ? proto + '://' + host : ''; };
-const payUrls = async (sid, amount, ret = '') => {
+const payUrls = async (sid, amount) => {
   const c = await finCfg(), out = {};
-  if (c.payme_merchant_id && c.payme_key) out.payme = (c.payme_test === '1' ? 'https://test.paycom.uz/' : 'https://checkout.paycom.uz/') + Buffer.from(`m=${c.payme_merchant_id};ac.student_id=${sid};a=${amount * 100}${ret ? ';c=' + ret : ''}`).toString('base64');
-  if (c.click_service_id && c.click_merchant_id && c.click_secret) out.click = `https://my.click.uz/services/pay?service_id=${encodeURIComponent(c.click_service_id)}&merchant_id=${encodeURIComponent(c.click_merchant_id)}&amount=${amount}&transaction_param=${sid}${ret ? '&return_url=' + encodeURIComponent(ret) : ''}`;
+  if (c.payme_merchant_id && c.payme_key) out.payme = (c.payme_test === '1' ? 'https://test.paycom.uz/' : 'https://checkout.paycom.uz/') + Buffer.from(`m=${c.payme_merchant_id};ac.student_id=${sid};a=${amount * 100}`).toString('base64');
+  if (c.click_service_id && c.click_merchant_id && c.click_secret) out.click = `https://my.click.uz/services/pay?service_id=${encodeURIComponent(c.click_service_id)}&merchant_id=${encodeURIComponent(c.click_merchant_id)}&amount=${amount}&transaction_param=${sid}`;
   return { urls: out, min: +(c.min_online || 1000) };
 };
 r('GET', '/student/billing', async ({ u }) => {
   const c = await finCfg(), st = await statement(u.id), has = !!(await one('SELECT 1 x FROM charges WHERE student_id=?', [u.id]));
   return { ...st, has_billing: has, org: Object.fromEntries(['org_name', 'org_inn', 'org_bank', 'org_account', 'org_mfo', 'org_phone', 'org_note'].map(k => [k, c[k] || ''])), online: { click: !!(c.click_service_id && c.click_merchant_id && c.click_secret), payme: !!(c.payme_merchant_id && c.payme_key), min: +(c.min_online || 1000) } };
 });
-r('POST', '/student/pay-link', async ({ u, b, ev }) => {
-  const a = intAmt(b.amount), p = await payUrls(u.id, a, siteOrigin(ev)); if (a < p.min) bad(`Minimal summa ${p.min} so'm`); if (a > 1e8) bad("Summa juda katta");
+r('POST', '/student/pay-link', async ({ u, b }) => {
+  const a = intAmt(b.amount), p = await payUrls(u.id, a); if (a < p.min) bad(`Minimal summa ${p.min} so'm`); if (a > 1e8) bad("Summa juda katta");
   const url = p.urls[b.provider]; if (!url) bad("Bu to'lov usuli yoqilmagan"); return { url };
 });
 // --- Payme Merchant API (JSON-RPC)
@@ -805,6 +868,16 @@ r('POST', '/pay/click/complete', async ({ b }) => {
   const pm = await payIns(t.student_id, t.amount, 'click', tashkentToday(), 'Click (onlayn)', null, 'click:' + t.ext_id);
   await run('UPDATE gateway_tx SET state=2,perform_time=?,payment_id=? WHERE id=?', [Date.now(), Number(pm.lastInsertRowid), t.id]); return clickReply(b, { merchant_confirm_id: Number(pm.lastInsertRowid) }, 0, 'Success');
 });
+// Administrator/direktor bosh sahifasi: haftalik davomat, sinflar kesimi, faol o'quvchilar
+async function adminDash(today) {
+  const d0 = new Date(today + 'T12:00:00Z'); d0.setUTCDate(d0.getUTCDate() - 6); const from = d0.toISOString().slice(0, 10);
+  const wk = await q('SELECT date,status,COUNT(*) n FROM attendance WHERE date BETWEEN ? AND ? GROUP BY date,status ORDER BY date', [from, today]), days = {};
+  for (let i = 0; i < 7; i++) { const x = new Date(d0); x.setUTCDate(d0.getUTCDate() + i); days[x.toISOString().slice(0, 10)] = { date: x.toISOString().slice(0, 10), keldi: 0, kelmadi: 0, kechikdi: 0, uzrli: 0 }; }
+  for (const x of wk) if (days[x.date]) days[x.date][x.status] = x.n;
+  const tc = await q('SELECT class_id,status,COUNT(*) n FROM attendance WHERE date=? GROUP BY class_id,status', [today]);
+  const cls = await q("SELECT c.id,c.name,h.name homeroom,(SELECT COUNT(*) FROM students s WHERE s.class_id=c.id AND s.status='faol') n FROM classes c LEFT JOIN users h ON h.id=c.homeroom_id WHERE c.archived=0 ORDER BY c.name");
+  return { att_week: Object.values(days), class_stats: cls.map(c => { const m = { keldi: 0, kelmadi: 0, kechikdi: 0, uzrli: 0 }; for (const x of tc) if (x.class_id === c.id) m[x.status] = x.n; return { ...c, ...m }; }) };
+}
 r('GET', '/dashboard', async ({ u }) => {
   const today = tashkentToday(), wd = new Date(today + 'T12:00:00Z').getUTCDay() || 7, tch = u.role === 'teacher';
   const cl = tch ? await q('SELECT id FROM classes WHERE homeroom_id=? UNION SELECT class_id FROM assignments WHERE teacher_id=?', [u.id, u.id]) : await q('SELECT id FROM classes');
@@ -814,10 +887,11 @@ r('GET', '/dashboard', async ({ u }) => {
   return {
     date: today, weekday: wd, role: u.role,
     classes: ids.length, students: (await one(`SELECT COUNT(*) n FROM students WHERE status='faol' AND class_id IN(${ph})`, ids)).n,
-    lessons_today: await q(`SELECT t.start,t.end,t.room,t.slot,c.name class,s.name subject,us.name teacher,t.class_id,t.subject_id,(SELECT COUNT(*) FROM attendance a WHERE a.class_id=t.class_id AND a.subject_id=t.subject_id AND a.date='${today}') marked,(SELECT COALESCE(l.topic,'') FROM lessons l WHERE l.class_id=t.class_id AND l.subject_id=t.subject_id AND l.date='${today}') topic FROM timetable t JOIN classes c ON c.id=t.class_id JOIN subjects s ON s.id=t.subject_id JOIN users us ON us.id=t.teacher_id WHERE t.weekday=?${tch ? ' AND t.teacher_id=?' : ''} ORDER BY t.start`, tch ? [wd, u.id] : [wd]),
+    lessons_today: await q(`SELECT t.start,t.end,t.room,t.slot,c.name class,s.name subject,us.name teacher,t.class_id,t.subject_id,(SELECT COUNT(*) FROM attendance a WHERE a.class_id=t.class_id AND a.subject_id=t.subject_id AND a.date='${today}') marked,(SELECT COALESCE(l.topic,'') FROM lessons l WHERE l.class_id=t.class_id AND l.subject_id=t.subject_id AND l.date='${today}') topic FROM timetable t JOIN classes c ON c.id=t.class_id JOIN subjects s ON s.id=t.subject_id JOIN users us ON us.id=t.teacher_id WHERE t.weekday=? AND ${ACT()}${tch ? ' AND t.teacher_id=?' : ''} ORDER BY t.start`, tch ? [wd, today, today, u.id] : [wd, today, today]),
     attendance_today: Object.fromEntries(['keldi', 'kelmadi', 'kechikdi', 'uzrli'].map(k => [k, (att.find(x => x.status === k) || { n: 0 }).n])),
     recent_grades: await q(`SELECT g.date,g.type,g.value,g.max,st.name student,c.name class,s.name subject FROM grades g JOIN students st ON st.id=g.student_id JOIN classes c ON c.id=g.class_id JOIN subjects s ON s.id=g.subject_id${tch ? ' WHERE g.teacher_id=?' : ''} ORDER BY g.id DESC LIMIT 8`, tch ? [u.id] : []),
-    scope: tch ? 'faqat o\'zingizga tegishli' : 'butun maktab'
+    scope: tch ? 'faqat o\'zingizga tegishli' : 'butun maktab',
+    ...(tch ? {} : await adminDash(today))
   };
 });
 
@@ -853,11 +927,31 @@ r('POST', '/export/xlsx', async ({ b }) => { // faqat mijoz yuborgan (allaqachon
 });
 
 const BK = ['settings', 'users', 'subjects', 'teacher_subjects', 'classes', 'assignments', 'students', 'timetable', 'lessons', 'grades', 'attendance', 'period_grades', 'class_fee', 'fee_plans', 'charges', 'payments', 'gateway_tx', 'academic_years', 'terms', 'bell_slots', 'grade_types', 'audit_logs'];
-r('GET', '/backup', async ({ u }) => {
-  need(u, 'admin'); const out = { version: 2, exported_at: now() };
-  for (const t of BK) out[t] = await q(`SELECT * FROM ${t}`);
-  out.users.forEach(x => delete x.pass); return out;
-});
+async function backupData() { await init(); const out = { version: 2, exported_at: now() }; for (const t of BK) out[t] = await q(`SELECT * FROM ${t}`); out.users.forEach(x => delete x.pass); return out; }
+exports.backupData = backupData;
+// ===== Monitoring: /health (UptimeRobot) va admin uchun tizim holati =====
+const T0 = Date.now(), PERSIST = () => !!(process.env.TURSO_DATABASE_URL || process.env.RAILWAY_VOLUME_MOUNT_PATH || process.env.DB_PATH);
+exports.ping = async () => { const t = Date.now(); await init(); await one('SELECT 1 x'); return Date.now() - t; };
+async function sysStatus() {
+  let db = null, err = null; try { db = await exports.ping(); } catch (e) { err = e.message; }
+  const bk = global.SCHOOL_BACKUP ? await global.SCHOOL_BACKUP.list().catch(() => null) : null, last = bk && bk.files[0] ? bk.files[0].date : null;
+  const days = last ? Math.floor((Date.parse(tashkentToday()) - Date.parse(last)) / 864e5) : null;
+  const warn = [];
+  if (err) warn.push('Baza javob bermayapti: ' + err);
+  if (!PERSIST()) warn.push("Doimiy baza yo'q: ma'lumotlar har deploydan keyin yo'qoladi (Turso yoki Railway Volume ulang)");
+  if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32) warn.push("SESSION_SECRET 32 belgidan qisqa");
+  if (bk && !bk.persistent) warn.push("Zaxira fayllari doimiy papkada emas (Railway Volume yoki BACKUP_DIR kerak)");
+  if (bk && (days === null || days > 1)) warn.push(days === null ? "Avto-zaxira hali yaratilmagan" : `Oxirgi avto-zaxira ${days} kun oldin`);
+  return { ok: !err, db_ms: db, uptime_s: Math.round((Date.now() - T0) / 1000), node: process.version, persistent: PERSIST(), backup: bk ? { last, days_ago: days, count: bk.files.length, persistent: bk.persistent } : null, warnings: warn };
+}
+exports.health = async () => { const x = await sysStatus(); return { ok: x.ok, body: { status: x.ok ? 'ok' : 'error', db_ms: x.db_ms, uptime_s: x.uptime_s, warnings: x.warnings.length } }; };
+r('GET', '/system/status', async ({ u }) => { need(u, 'admin', 'director'); const x = await sysStatus(); x.reports = (await one("SELECT COUNT(*) n FROM chat_reports WHERE status='new'")).n; x.tg = !!(await tgCfg().catch(() => ({}))).bot_token; return x; });
+r('GET', '/backup', async ({ u }) => { need(u, 'admin'); return backupData(); });
+// Server avto-zaxirasi (faqat server.js ishlaganda; fayllar server diskida, Railway Volume bo'lsa doimiy)
+const bkh = () => global.SCHOOL_BACKUP || bad("Avto-zaxira faqat doimiy serverda (Railway) ishlaydi", 501);
+r('GET', '/backups', async ({ u }) => { need(u, 'admin'); return global.SCHOOL_BACKUP ? { supported: true, ...(await global.SCHOOL_BACKUP.list()) } : { supported: false }; });
+r('POST', '/backups/run', async ({ u }) => { need(u, 'admin'); const x = await bkh().run(); await audit(u, 'backup', 'system', '-', null, x); return x; });
+r('GET', '/backups/(zaxira-\\d{4}-\\d{2}-\\d{2}\\.json\\.gz)', async ({ u, m }) => { need(u, 'admin'); try { return await bkh().read(m[1]); } catch (e) { if (e instanceof HttpErr) throw e; bad('Fayl topilmadi', 404); } });
 // Tiklash: yagona tranzaksiya (xato bo'lsa hech narsa o'zgarmaydi). Foydalanuvchilar o'chirilmaydi:
 // zaxirada bor, lekin bazada yo'q xodimlar faolsiz va parolsiz tiklanadi (admin yangi parol beradi).
 r('POST', '/restore', async ({ u, b }) => {
@@ -876,6 +970,317 @@ r('POST', '/restore', async ({ u, b }) => {
   return { ok: 1, restored: Object.fromEntries(fill.map(t => [t, (d[t] || []).length])) };
 });
 
+// ===== Chat (xodim ↔ ota-ona/o'quvchi) =====
+// Ishtirokchi kodi: u<xodim id>, s<o'quvchi id>, p<ota-ona (o'quvchi) id>. Faqat xodim↔xodim va xodim↔oila: oila a'zolari bir-biriga yoza olmaydi.
+const pOf = u => (u.role === 'student' ? 's' : u.role === 'parent' ? 'p' : 'u') + u.id;
+const PARTY = /^[usp]\d{1,9}$/, CHATRL = new Map();
+async function pNames(ps) {
+  const out = {}, g = { u: [], s: [], p: [] }; for (const p of new Set(ps)) g[p[0]].push(+p.slice(1));
+  const L = a => a.map(() => '?').join(',');
+  if (g.u.length) for (const x of await q(`SELECT id,name,role FROM users WHERE id IN(${L(g.u)})`, g.u)) out['u' + x.id] = { name: x.name, sub: { admin: 'Administrator', director: 'Direktor', teacher: "O'qituvchi" }[x.role] || '' };
+  const sid = [...new Set([...g.s, ...g.p])];
+  if (sid.length) for (const x of await q(`SELECT s.id,s.name,c.name cls FROM students s JOIN classes c ON c.id=s.class_id WHERE s.id IN(${L(sid)})`, sid)) { if (g.s.includes(x.id)) out['s' + x.id] = { name: x.name, sub: x.cls + " sinf o'quvchisi" }; if (g.p.includes(x.id)) out['p' + x.id] = { name: x.name + ' (ota-ona)', sub: x.cls + " sinf o'quvchisining ota-onasi" }; }
+  for (const p of ps) out[p] ||= { name: "O'chirilgan hisob", sub: '' }; return out;
+}
+async function canChat(a, b) {
+  if (a === b || !PARTY.test(a) || !PARTY.test(b)) return false;
+  const ia = +a.slice(1), ib = +b.slice(1);
+  if (a[0] === 'u' && b[0] === 'u') return (await one('SELECT COUNT(*) n FROM users WHERE is_active=1 AND id IN(?,?)', [ia, ib])).n === 2;
+  let st, fam, fk; if (a[0] === 'u' && b[0] !== 'u') { st = ia; fam = ib; fk = b[0]; } else if (b[0] === 'u' && a[0] !== 'u') { st = ib; fam = ia; fk = a[0]; } else return false;
+  const U = await one('SELECT id,role FROM users WHERE id=? AND is_active=1', [st]), S = await one("SELECT class_id FROM students WHERE id=? AND status='faol'", [fam]); if (!U || !S) return false;
+  if (!(await one(`SELECT 1 x FROM ${fk === 'p' ? 'parent_accounts' : 'student_accounts'} WHERE student_id=? AND is_active=1`, [fam]))) return false;
+  if (U.role !== 'teacher') return true;
+  return !!(await one('SELECT 1 x FROM classes WHERE id=? AND homeroom_id=? UNION SELECT 1 FROM assignments WHERE class_id=? AND teacher_id=?', [S.class_id, U.id, S.class_id, U.id]));
+}
+async function chatContacts(u, qs) {
+  const term = String(qs.q || '').trim().toLowerCase().slice(0, 40), out = [];
+  if (u.role === 'student' || u.role === 'parent') {
+    const t = await q(`SELECT us.id,us.name,us.role,GROUP_CONCAT(DISTINCT sb.name) subs,MAX(CASE WHEN c.homeroom_id=us.id THEN 1 ELSE 0 END) hr FROM users us LEFT JOIN assignments a ON a.teacher_id=us.id AND a.class_id=? LEFT JOIN subjects sb ON sb.id=a.subject_id LEFT JOIN classes c ON c.id=? WHERE us.is_active=1 AND (us.role IN('admin','director') OR a.id IS NOT NULL OR c.homeroom_id=us.id) GROUP BY us.id ORDER BY us.name`, [u.class_id, u.class_id]);
+    for (const x of t) out.push({ party: 'u' + x.id, name: x.name, sub: x.role === 'admin' ? 'Administrator' : x.role === 'director' ? 'Direktor' : [x.hr ? 'Sinf rahbari' : '', x.subs || ''].filter(Boolean).join(' · ') });
+    return out.filter(x => !term || x.name.toLowerCase().includes(term));
+  }
+  for (const x of await q('SELECT id,name,role FROM users WHERE is_active=1 AND id!=? ORDER BY name', [u.id])) if (!term || x.name.toLowerCase().includes(term)) out.push({ party: 'u' + x.id, name: x.name, sub: { admin: 'Administrator', director: 'Direktor', teacher: "O'qituvchi" }[x.role], kind: 'staff' });
+  const cid = +qs.class_id || 0; if (!term && !cid) return out;
+  const tch = u.role === 'teacher', args = [];
+  let w = "s.status='faol'"; if (tch) { w += ' AND (c.homeroom_id=? OR EXISTS(SELECT 1 FROM assignments a WHERE a.class_id=s.class_id AND a.teacher_id=?))'; args.push(u.id, u.id); }
+  if (cid) { w += ' AND s.class_id=?'; args.push(cid); } if (term) { w += ' AND s.name LIKE ?'; args.push('%' + term + '%'); }
+  for (const s of await q(`SELECT s.id,s.name,c.name cls,sa.is_active sa,pa.is_active pa FROM students s JOIN classes c ON c.id=s.class_id LEFT JOIN student_accounts sa ON sa.student_id=s.id LEFT JOIN parent_accounts pa ON pa.student_id=s.id WHERE ${w} ORDER BY c.name,s.name LIMIT 60`, args)) {
+    if (s.pa) out.push({ party: 'p' + s.id, name: s.name + ' (ota-ona)', sub: s.cls + ' sinf', kind: 'parent' });
+    if (s.sa) out.push({ party: 's' + s.id, name: s.name, sub: s.cls + " sinf o'quvchisi", kind: 'student' });
+  }
+  return out;
+}
+async function chatThreads(u) {
+  const me = pOf(u), rows = await q(`SELECT t.id,t.a,t.b,t.last_at,t.last_text,(SELECT COUNT(*) FROM chat_msgs m WHERE m.thread_id=t.id AND m.sender!=? AND m.id>COALESCE((SELECT last_id FROM chat_reads r WHERE r.thread_id=t.id AND r.party=?),0)) unread FROM chat_threads t WHERE t.a=? OR t.b=? ORDER BY t.last_at DESC LIMIT 100`, [me, me, me, me]);
+  const nm = await pNames(rows.map(t => t.a === me ? t.b : t.a));
+  return rows.map(t => { const o = t.a === me ? t.b : t.a; return { id: t.id, party: o, name: nm[o].name, sub: nm[o].sub, last_at: t.last_at, last_text: t.last_text, unread: t.unread }; });
+}
+const muteOf = async p => { const m = await one('SELECT until,reason FROM chat_mutes WHERE party=?', [p]); return m && m.until > now() ? m : null; };
+const isMod = u => u.role === 'admin' || u.role === 'director';
+async function chatOpen(u, id, after) {
+  const me = pOf(u), t = await one('SELECT * FROM chat_threads WHERE id=? AND (a=? OR b=?)', [id, me, me]); if (!t) bad('Topilmadi', 404);
+  const o = t.a === me ? t.b : t.a, nm = (await pNames([o]))[o];
+  const ms = (await q('SELECT id,sender,body,created_at,del_at FROM chat_msgs WHERE thread_id=? AND id>? ORDER BY id DESC LIMIT 100', [id, after || 0])).reverse();
+  const top = (await one('SELECT MAX(id) m FROM chat_msgs WHERE thread_id=? AND sender!=?', [id, me])).m;
+  if (top) await run('INSERT INTO chat_reads(thread_id,party,last_id) VALUES(?,?,?) ON CONFLICT(thread_id,party) DO UPDATE SET last_id=MAX(last_id,excluded.last_id)', [id, me, top]);
+  const mu = await muteOf(me);
+  return { id, party: o, name: nm.name, sub: nm.sub, can: !mu && await canChat(me, o), muted: mu ? mu.until : null, msgs: ms.map(x => ({ id: x.id, mine: x.sender === me, body: x.del_at ? '' : x.body, del: x.del_at ? 1 : 0, at: x.created_at })) };
+}
+async function chatSend(u, b) {
+  const me = pOf(u), to = String(b.to || ''), body = String(b.body || '').trim();
+  if (!body) bad('Xabar bo\'sh'); if (body.length > 2000) bad('Xabar 2000 belgidan oshmasin');
+  const mu = await muteOf(me); if (mu) bad("Sizga " + mu.until.slice(0, 10) + " gacha chatda yozish cheklangan" + (mu.reason ? ': ' + mu.reason : ''), 403);
+  if (!(await canChat(me, to))) bad('Bu foydalanuvchiga yozish mumkin emas', 403);
+  const rl = CHATRL.get(me) || []; const nowT = Date.now(), fresh = rl.filter(x => nowT - x < 60e3); if (fresh.length >= 20) bad("Juda tez yuboryapsiz: bir daqiqa kuting", 429); fresh.push(nowT); CHATRL.set(me, fresh);
+  const [a, bb] = me < to ? [me, to] : [to, me], at = now();
+  await run('INSERT INTO chat_threads(a,b,last_at,last_text) VALUES(?,?,?,?) ON CONFLICT(a,b) DO UPDATE SET last_at=excluded.last_at,last_text=excluded.last_text', [a, bb, at, body.slice(0, 80)]);
+  const t = await one('SELECT id FROM chat_threads WHERE a=? AND b=?', [a, bb]);
+  const seen = (await one('SELECT COALESCE(MAX(last_id),0) m FROM chat_reads WHERE thread_id=? AND party=?', [t.id, to])).m, hadUnread = !!(await one('SELECT 1 x FROM chat_msgs WHERE thread_id=? AND sender=? AND id>?', [t.id, me, seen]));
+  const x = await run('INSERT INTO chat_msgs(thread_id,sender,body,created_at) VALUES(?,?,?,?)', [t.id, me, body, at]);
+  if (to[0] === 'p' && !hadUnread) tgParents(+to.slice(1), 'ev_chat', `💬 <b>${esc(u.name)}</b> sizga xabar yubordi. Javob berish uchun maktab saytiga kiring.`).catch(() => {});
+  return { thread_id: t.id, id: Number(x.lastInsertRowid) };
+}
+const chatUnread = async u => { const me = pOf(u), rep = isMod(u) ? (await one("SELECT COUNT(*) n FROM chat_reports WHERE status='new'")).n : 0; return { rep, n: (await one(`SELECT COUNT(*) n FROM chat_msgs m JOIN chat_threads t ON t.id=m.thread_id WHERE (t.a=? OR t.b=?) AND m.sender!=? AND m.id>COALESCE((SELECT last_id FROM chat_reads r WHERE r.thread_id=t.id AND r.party=?),0)`, [me, me, me, me])).n }; };
+for (const [pre, guard] of [['', () => {}], ['/student', needS]]) {
+  r('GET', pre + '/chat/contacts', async ({ u, qs }) => { guard(u); return chatContacts(u, qs); });
+  r('GET', pre + '/chat/threads', async ({ u }) => { guard(u); return chatThreads(u); });
+  r('GET', pre + '/chat/unread', async ({ u }) => { guard(u); return chatUnread(u); });
+  r('GET', pre + '/chat/(\\d+)', async ({ u, qs, m }) => { guard(u); return chatOpen(u, +m[1], +qs.after || 0); });
+  r('POST', pre + '/chat/send', async ({ u, b }) => { guard(u); return chatSend(u, b); });
+}
+
+// ===== Chat moderatsiyasi: xabarni o'chirish, shikoyat, yozishni cheklash (admin/direktor) =====
+// O'chirish "yumshoq": xabar foydalanuvchilarga ko'rinmaydi, lekin yozuv shikoyatni ko'rib chiqish uchun saqlanadi.
+// Admin faqat shikoyat qilingan xabar va uning atrofidagi yozishmani ko'radi (boshqa suhbatlarni o'qimaydi).
+async function chatMsgOf(u, id) {
+  const me = pOf(u), m = await one('SELECT m.*,t.a,t.b FROM chat_msgs m JOIN chat_threads t ON t.id=m.thread_id WHERE m.id=?', [id]);
+  if (!m || (m.a !== me && m.b !== me && !isMod(u))) bad('Topilmadi', 404); return { m, me };
+}
+async function chatDel(u, id) {
+  const { m, me } = await chatMsgOf(u, id);
+  if (m.sender !== me && !isMod(u)) bad("Faqat o'z xabaringizni o'chira olasiz", 403);
+  if (m.del_at) return { ok: 1 };
+  await run('UPDATE chat_msgs SET del_at=?,del_by=? WHERE id=?', [now(), me, id]);
+  const last = await one('SELECT id,body FROM chat_msgs WHERE thread_id=? AND del_at IS NULL ORDER BY id DESC LIMIT 1', [m.thread_id]);
+  await run('UPDATE chat_threads SET last_text=? WHERE id=?', [last ? last.body.slice(0, 80) : "Xabar o'chirildi", m.thread_id]);
+  if (m.sender !== me) await audit(u, 'chat_delete', 'chat_msg', id, { sender: m.sender }, null);
+  return { ok: 1 };
+}
+async function chatReport(u, id, b) {
+  const { m, me } = await chatMsgOf(u, id); if (m.a !== me && m.b !== me) bad('Topilmadi', 404);
+  if (m.sender === me) bad("O'z xabaringizga shikoyat qilib bo'lmaydi");
+  const reason = String(b.reason || '').trim().slice(0, 300), rl = CHATRL.get('R' + me) || [], t = Date.now(), fresh = rl.filter(x => t - x < 3600e3);
+  if (fresh.length >= 10) bad("Juda ko'p shikoyat: keyinroq urinib ko'ring", 429); fresh.push(t); CHATRL.set('R' + me, fresh);
+  await run('INSERT INTO chat_reports(msg_id,thread_id,reporter,reason,created_at) VALUES(?,?,?,?,?) ON CONFLICT(msg_id,reporter) DO NOTHING', [id, m.thread_id, me, reason, now()]);
+  return { ok: 1 };
+}
+for (const [pre, guard] of [['', () => {}], ['/student', needS]]) {
+  r('POST', pre + '/chat/msg/(\\d+)/delete', async ({ u, m }) => { guard(u); return chatDel(u, +m[1]); });
+  r('POST', pre + '/chat/msg/(\\d+)/report', async ({ u, m, b }) => { guard(u); return chatReport(u, +m[1], b || {}); });
+}
+r('GET', '/chat/mod/reports', async ({ u, qs }) => {
+  need(u, 'admin', 'director'); const st = qs.status === 'closed' ? 'closed' : 'new';
+  const rows = await q(`SELECT r.id,r.msg_id,r.thread_id,r.reporter,r.reason,r.created_at,r.status,r.note,m.sender,m.body,m.del_at FROM chat_reports r JOIN chat_msgs m ON m.id=r.msg_id WHERE r.status=? ORDER BY r.id DESC LIMIT 100`, [st]);
+  const nm = await pNames(rows.flatMap(x => [x.reporter, x.sender]));
+  return rows.map(x => ({ id: x.id, msg_id: x.msg_id, reason: x.reason, at: x.created_at, status: x.status, note: x.note, body: x.body, deleted: x.del_at ? 1 : 0, reporter: { party: x.reporter, name: nm[x.reporter].name, sub: nm[x.reporter].sub }, sender: { party: x.sender, name: nm[x.sender].name, sub: nm[x.sender].sub } }));
+});
+r('GET', '/chat/mod/reports/(\\d+)/context', async ({ u, m }) => {
+  need(u, 'admin', 'director'); const rp = await one('SELECT * FROM chat_reports WHERE id=?', [+m[1]]); if (!rp) bad('Topilmadi', 404);
+  const before = await q('SELECT id,sender,body,created_at,del_at FROM chat_msgs WHERE thread_id=? AND id<=? ORDER BY id DESC LIMIT 7', [rp.thread_id, rp.msg_id]), after = await q('SELECT id,sender,body,created_at,del_at FROM chat_msgs WHERE thread_id=? AND id>? ORDER BY id LIMIT 3', [rp.thread_id, rp.msg_id]);
+  const ms = [...before.reverse(), ...after], nm = await pNames(ms.map(x => x.sender));
+  return { msgs: ms.map(x => ({ id: x.id, name: nm[x.sender].name, party: x.sender, body: x.body, deleted: x.del_at ? 1 : 0, at: x.created_at, hit: x.id === rp.msg_id ? 1 : 0 })) };
+});
+r('POST', '/chat/mod/reports/(\\d+)/close', async ({ u, m, b }) => {
+  need(u, 'admin', 'director'); const x = await run("UPDATE chat_reports SET status='closed',handled_by=?,handled_at=?,note=? WHERE id=?", [u.id, now(), String((b || {}).note || '').slice(0, 300), +m[1]]); if (!x.rowsAffected) bad('Topilmadi', 404);
+  await audit(u, 'chat_report_close', 'chat_report', m[1], null, null); return { ok: 1 };
+});
+r('POST', '/chat/mod/mute', async ({ u, b }) => {
+  need(u, 'admin', 'director'); const p = String(b.party || ''), days = Math.round(+b.days);
+  if (!/^[sp]\d{1,9}$/.test(p)) bad("Faqat o'quvchi yoki ota-onani cheklash mumkin"); if (!(days >= 1 && days <= 365)) bad('Muddat 1–365 kun');
+  const until = new Date(Date.now() + days * 864e5).toISOString().replace('T', ' ').slice(0, 19), reason = String(b.reason || '').trim().slice(0, 200);
+  await run('INSERT INTO chat_mutes(party,until,reason,by_user,created_at) VALUES(?,?,?,?,?) ON CONFLICT(party) DO UPDATE SET until=excluded.until,reason=excluded.reason,by_user=excluded.by_user,created_at=excluded.created_at', [p, until, reason, u.id, now()]);
+  await audit(u, 'chat_mute', 'chat_party', p, null, { until, reason }); return { ok: 1, until };
+});
+r('POST', '/chat/mod/unmute', async ({ u, b }) => { need(u, 'admin', 'director'); const p = String(b.party || ''); await run('DELETE FROM chat_mutes WHERE party=?', [p]); await audit(u, 'chat_unmute', 'chat_party', p, null, null); return { ok: 1 }; });
+r('GET', '/chat/mod/mutes', async ({ u }) => {
+  need(u, 'admin', 'director'); const rows = await q('SELECT party,until,reason,created_at FROM chat_mutes WHERE until>? ORDER BY until', [now()]), nm = await pNames(rows.map(x => x.party));
+  return rows.map(x => ({ party: x.party, name: nm[x.party].name, sub: nm[x.party].sub, until: x.until, reason: x.reason }));
+});
+async function chatPurge(sid) {
+  const ps = ['s' + sid, 'p' + sid], ids = (await q('SELECT id FROM chat_threads WHERE a IN(?,?) OR b IN(?,?)', [...ps, ...ps])).map(x => x.id);
+  const st = [{ sql: 'DELETE FROM tg_links WHERE student_id=?', args: [sid] }, { sql: 'DELETE FROM tg_codes WHERE student_id=?', args: [sid] }];
+  st.push({ sql: 'DELETE FROM chat_mutes WHERE party IN(?,?)', args: ps });
+  for (const i of ids) st.push({ sql: 'DELETE FROM chat_reports WHERE thread_id=?', args: [i] }, { sql: 'DELETE FROM chat_msgs WHERE thread_id=?', args: [i] }, { sql: 'DELETE FROM chat_reads WHERE thread_id=?', args: [i] }, { sql: 'DELETE FROM chat_threads WHERE id=?', args: [i] });
+  await db.batch(st, 'write');
+}
+
+// ===== Telegram: ota-onalarga xabarlar (bot tokeni bazada, zaxira nusxaga kirmaydi) =====
+const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const TGEV = { ev_remind: "Qarz bo'yicha to'lov eslatmasi", ev_absent: 'Darsga kelmadi / kech qoldi', ev_grade: 'Yangi baho', ev_pay: "To'lov qabul qilindi", ev_ann: "E'lonlar (ota-onalarga)", ev_chat: 'Yangi chat xabari' };
+const tgCfg = async () => Object.fromEntries((await q('SELECT key,value FROM tg_config')).map(x => [x.key, x.value]));
+const tgSet = (k, v) => run('INSERT INTO tg_config(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', [k, v]);
+async function tgApi(token, method, body) {
+  const ac = new AbortController(), t = setTimeout(() => ac.abort(), 8000);
+  try { const x = await fetch(`https://api.telegram.org/bot${token}/${method}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}), signal: ac.signal }); return await x.json(); }
+  catch (e) { return { ok: false, description: String(e.message || e) }; } finally { clearTimeout(t); }
+}
+const TGQ = []; let tgBusy = false;
+function tgPush(chat, text) { TGQ.push([chat, text]); if (!tgBusy) tgPump(); }
+async function tgPump() {
+  tgBusy = true;
+  try {
+    const c = await tgCfg();
+    while (TGQ.length) {
+      const [chat, text] = TGQ.shift(); if (!c.bot_token) continue;
+      const x = await tgApi(c.bot_token, 'sendMessage', { chat_id: chat, text, parse_mode: 'HTML', disable_web_page_preview: true });
+      if (x.ok === false && x.error_code === 403) await run('DELETE FROM tg_links WHERE chat_id=?', [chat]); // ota-ona botni bloklagan
+      await new Promise(r => setTimeout(r, 60));
+    }
+  } catch (e) { console.error('tg', e); } finally { tgBusy = false; }
+}
+async function tgParents(sid, ev, text) {
+  const c = await tgCfg(); if (!c.bot_token || c[ev] === '0') return;
+  for (const l of await q('SELECT chat_id FROM tg_links WHERE student_id=?', [sid])) tgPush(l.chat_id, text);
+}
+const tgBal = async sid => (await one('SELECT (SELECT COALESCE(SUM(amount),0) FROM charges WHERE student_id=?)-(SELECT COALESCE(SUM(amount),0) FROM payments WHERE student_id=? AND status=\'ok\') b', [sid, sid])).b;
+const tgSafe = p => p.catch(e => console.error('tg', e && e.message));
+// o'quvchi/ota-ona bildirishnomalari (xato bo'lsa asosiy amalga halal bermaydi)
+const tgAbs = (sid, sj, date, st) => tgSafe((async () => { const x = await one('SELECT s.name,(SELECT name FROM subjects WHERE id=?) sb FROM students s WHERE s.id=?', [sj, sid]); if (x) await tgParents(sid, 'ev_absent', `${st === 'kelmadi' ? '⚠️' : '⏰'} <b>${esc(x.name)}</b> ${esc(date)} kuni ${esc(x.sb)} darsida ${st === 'kelmadi' ? 'qatnashmadi' : 'kech qoldi'}.`); })());
+const tgGrade = (sid, sj, date, v, max, type) => tgSafe((async () => { const x = await one('SELECT s.name,(SELECT name FROM subjects WHERE id=?) sb FROM students s WHERE s.id=?', [sj, sid]); if (x) await tgParents(sid, 'ev_grade', `📝 <b>${esc(x.name)}</b>: ${esc(x.sb)} — <b>${v}/${max}</b> (${esc(type)}, ${esc(date)})`); })());
+const tgPay = (sid, amt) => tgSafe((async () => { const x = await one('SELECT name FROM students WHERE id=?', [sid]); if (!x) return; const b = await tgBal(sid); await tgParents(sid, 'ev_pay', `💳 <b>${esc(x.name)}</b> uchun ${Math.round(amt).toLocaleString('ru-RU')} so'm to'lov qabul qilindi. ${b > 0 ? `Qoldiq: ${Math.round(b).toLocaleString('ru-RU')} so'm.` : b < 0 ? "Oldindan to'langan." : "Qarz yo'q."}`); })());
+const tgAnn = (title, body, aud) => tgSafe((async () => { if (aud !== 'all' && aud !== 'parents') return; const c = await tgCfg(); if (!c.bot_token || c.ev_ann === '0') return; const seen = new Set(); for (const l of await q("SELECT l.chat_id FROM tg_links l JOIN students s ON s.id=l.student_id WHERE s.status='faol'")) if (!seen.has(l.chat_id)) { seen.add(l.chat_id); tgPush(l.chat_id, `📢 <b>${esc(title)}</b>\n${esc(String(body).slice(0, 600))}`); } })());
+const CODE_AL = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+r('POST', '/student/tg/code', async ({ u }) => {
+  if (u.role !== 'parent') bad("Faqat ota-ona kabinetida", 403); const c = await tgCfg(); if (!c.bot_token || !c.bot_username) bad('Telegram bot hali sozlanmagan. Maktab ma\'muriyatiga murojaat qiling', 400);
+  await run('DELETE FROM tg_codes WHERE exp<?', [Date.now()]); await run('DELETE FROM tg_codes WHERE student_id=?', [u.id]);
+  const code = Array.from(crypto.randomBytes(8), x => CODE_AL[x % 32]).join(''); await run('INSERT INTO tg_codes(code,student_id,exp) VALUES(?,?,?)', [code, u.id, Date.now() + 30 * 60e3]);
+  return { code, bot: c.bot_username, url: `https://t.me/${c.bot_username}?start=${code}` };
+});
+r('GET', '/student/tg', async ({ u }) => { needS(u); const c = await tgCfg(); return { available: u.role === 'parent' && !!c.bot_token && !!c.bot_username, bot: c.bot_username || null, linked: u.role === 'parent' ? (await one('SELECT COUNT(*) n FROM tg_links WHERE student_id=?', [u.id])).n : 0 }; });
+r('DELETE', '/student/tg', async ({ u }) => { if (u.role !== 'parent') bad('Ruxsat yo\'q', 403); await run('DELETE FROM tg_links WHERE student_id=?', [u.id]); return { ok: 1 }; });
+r('POST', '/tg/webhook/([A-Za-z0-9_-]+)', async ({ m, b, ip }) => {
+  const c = await tgCfg(), sec = String(c.webhook_secret || ''), got = m[1];
+  if (!sec || got.length !== sec.length || !crypto.timingSafeEqual(Buffer.from(got), Buffer.from(sec))) bad('Ruxsat yo\'q', 403);
+  const msg = b && b.message; if (!msg || !msg.chat || msg.chat.type !== 'private' || typeof msg.text !== 'string') return { ok: 1 };
+  const chat = String(msg.chat.id), text = msg.text.trim(), say = t => tgApi(c.bot_token, 'sendMessage', { chat_id: chat, text: t, parse_mode: 'HTML' });
+  const mm = /^\/start(?:@\w+)?(?:\s+([A-Za-z0-9]{6,12}))?$/i.exec(text);
+  if (mm && mm[1]) {
+    if (locked('T|' + chat, 6)) { await say("Juda ko'p urinish. Keyinroq qayta urinib ko'ring."); return { ok: 1 }; }
+    const k = await one('SELECT c.student_id,s.name FROM tg_codes c JOIN students s ON s.id=c.student_id WHERE c.code=? AND c.exp>?', [mm[1].toUpperCase(), Date.now()]);
+    if (!k) { failed('T|' + chat); await say("Kod noto'g'ri yoki muddati tugagan. Saytdagi «To'lovlar/Telegram» bo'limidan yangi kod oling."); return { ok: 1 }; }
+    await run('INSERT OR IGNORE INTO tg_links(chat_id,student_id,created_at) VALUES(?,?,?)', [chat, k.student_id, now()]); await run('DELETE FROM tg_codes WHERE code=?', [mm[1].toUpperCase()]);
+    await say(`✅ Ulandi: <b>${esc(k.name)}</b>. Endi baho, davomat, to'lov va e'lonlar shu yerga keladi.\nTo'xtatish: /stop`);
+  } else if (/^\/stop/i.test(text)) { await run('DELETE FROM tg_links WHERE chat_id=?', [chat]); await say("Xabarlar o'chirildi. Qayta ulash uchun saytdan yangi kod oling."); }
+  else await say("Assalomu alaykum! Farzandingiz xabarlarini olish uchun maktab saytidagi ota-ona kabinetida «Telegramni ulash» tugmasini bosing.");
+  return { ok: 1 };
+});
+r('GET', '/tg/config', async ({ u, ev }) => {
+  need(u, 'admin'); const c = await tgCfg(), host = ev.headers?.['x-forwarded-host'] || ev.headers?.host || '';
+  return { token_set: !!c.bot_token, bot_username: c.bot_username || '', events: Object.fromEntries(Object.keys(TGEV).map(k => [k, c[k] !== '0'])), labels: TGEV, parents_linked: (await one('SELECT COUNT(DISTINCT student_id) n FROM tg_links')).n, chats: (await one('SELECT COUNT(DISTINCT chat_id) n FROM tg_links')).n, webhook_url: c.webhook_secret && host ? `https://${host}/api/tg/webhook/${c.webhook_secret}` : null, webhook_on: c.webhook_on === '1' };
+});
+r('PUT', '/tg/config', async ({ u, b }) => {
+  need(u, 'admin'); const tok = String(b.bot_token || '').trim();
+  if (tok) { if (!/^\d{5,12}:[A-Za-z0-9_-]{30,60}$/.test(tok)) bad("Bot tokeni formati noto'g'ri"); const me = await tgApi(tok, 'getMe'); if (!me.ok) bad("Token qabul qilinmadi: " + (me.description || 'Telegramga ulanib bo\'lmadi'));
+    await tgSet('bot_token', tok); await tgSet('bot_username', me.result.username || ''); await tgSet('webhook_on', '0'); }
+  if (b.events && typeof b.events === 'object') for (const k of Object.keys(TGEV)) if (k in b.events) await tgSet(k, b.events[k] ? '1' : '0');
+  if (!(await tgCfg()).webhook_secret) await tgSet('webhook_secret', crypto.randomBytes(24).toString('base64url'));
+  await audit(u, 'update', 'tg_config', '-', null, { token: tok ? 'yangilandi' : undefined }); return { ok: 1 };
+});
+r('DELETE', '/tg/config', async ({ u }) => { need(u, 'admin'); const c = await tgCfg(); if (c.bot_token) await tgApi(c.bot_token, 'deleteWebhook'); await run("DELETE FROM tg_config WHERE key IN('bot_token','bot_username','webhook_on','webhook_secret')"); await run('DELETE FROM tg_links'); await run('DELETE FROM tg_codes'); await audit(u, 'delete', 'tg_config', '-', null, null); return { ok: 1 }; });
+r('POST', '/tg/webhook-set', async ({ u, ev }) => {
+  need(u, 'admin'); const c = await tgCfg(), host = ev.headers?.['x-forwarded-host'] || ev.headers?.host; if (!c.bot_token) bad('Avval bot tokenini saqlang');
+  if (!c.webhook_secret) { await tgSet('webhook_secret', crypto.randomBytes(24).toString('base64url')); c.webhook_secret = (await tgCfg()).webhook_secret; }
+  const x = await tgApi(c.bot_token, 'setWebhook', { url: `https://${host}/api/tg/webhook/${c.webhook_secret}`, allowed_updates: ['message'], drop_pending_updates: true });
+  if (!x.ok) bad('Webhook o\'rnatilmadi: ' + (x.description || 'xato')); await tgSet('webhook_on', '1'); return { ok: 1 };
+});
+r('POST', '/tg/test', async ({ u, b }) => { // administrator o'ziga emas, tanlangan ota-ona ulanishiga sinov xabari
+  need(u, 'admin'); const c = await tgCfg(); if (!c.bot_token) bad('Bot sozlanmagan'); const n = (await q('SELECT chat_id FROM tg_links WHERE student_id=?', [+b.student_id || 0])); for (const l of n) tgPush(l.chat_id, "🔔 Sinov xabari: Telegram ulanishi ishlayapti."); return { sent: n.length };
+});
+
+// ===== Parolni tiklash (o'quvchi/ota-ona): bir martalik kod ota-onaning ulangan Telegramiga yuboriladi =====
+const sha = x => crypto.createHash('sha256').update(String(x)).digest('hex');
+const famAcc = async lg => { let a = await one("SELECT a.*,s.status,'s' kind FROM student_accounts a JOIN students s ON s.id=a.student_id WHERE lower(a.login)=?", [lg]); return a || await one("SELECT a.*,s.status,'p' kind FROM parent_accounts a JOIN students s ON s.id=a.student_id WHERE lower(a.login)=?", [lg]); };
+r('POST', '/forgot', async ({ b, ip }) => {
+  const lg = String(b.login || '').trim().toLowerCase().slice(0, 60); if (!lg) bad('Loginni kiriting');
+  if (locked('F|' + ip, 8) || locked('FL|' + lg, 4)) bad("Juda ko'p urinish. 10 daqiqadan keyin qayta urinib ko'ring", 429);
+  failed('F|' + ip); failed('FL|' + lg);
+  const a = await famAcc(lg);
+  if (a && a.is_active && a.status === 'faol') {
+    const links = await q('SELECT chat_id FROM tg_links WHERE student_id=?', [a.student_id]), cfg = await tgCfg(), ex = await one('SELECT exp FROM reset_codes WHERE login=?', [lg]);
+    if (links.length && cfg.bot_token && !(ex && ex.exp - 9 * 60e3 > Date.now())) { // 60 soniyada bir martadan ko'p yuborilmaydi
+      const code = String(crypto.randomInt(100000, 1000000));
+      await run('INSERT INTO reset_codes(login,code,exp,tries) VALUES(?,?,?,0) ON CONFLICT(login) DO UPDATE SET code=excluded.code,exp=excluded.exp,tries=0', [lg, sha(code), Date.now() + 10 * 60e3]);
+      for (const l of links) tgPush(l.chat_id, `🔐 Parolni tiklash kodi: <b>${code}</b>\nLogin: ${esc(a.login)}. 10 daqiqa amal qiladi. Siz so'ramagan bo'lsangiz, e'tibor bermang.`);
+    }
+  }
+  return { ok: 1, message: "Agar login to'g'ri va ota-onaning Telegrami ulangan bo'lsa, tasdiqlash kodi yuborildi (10 daqiqa amal qiladi). Telegram ulanmagan bo'lsa, sinf rahbaringizga murojaat qiling." }; // login bor-yo'qligi oshkor qilinmaydi
+});
+r('POST', '/forgot-confirm', async ({ b, ip }) => {
+  const lg = String(b.login || '').trim().toLowerCase().slice(0, 60), code = String(b.code || '').trim(), np = String(b.password || '');
+  if (locked('C|' + ip, 15) || locked('CL|' + lg, 8)) bad("Juda ko'p urinish. 10 daqiqadan keyin qayta urinib ko'ring", 429);
+  if (np.length < 8) bad("Yangi parol kamida 8 belgi bo'lsin");
+  const rc = await one('SELECT * FROM reset_codes WHERE login=?', [lg]), a = await famAcc(lg);
+  const same = rc && /^\d{6}$/.test(code) && crypto.timingSafeEqual(Buffer.from(sha(code)), Buffer.from(rc.code));
+  if (!rc || !a || !a.is_active || rc.exp < Date.now() || rc.tries >= 5 || !same) { failed('C|' + ip); failed('CL|' + lg); if (rc) await run('UPDATE reset_codes SET tries=tries+1 WHERE login=?', [lg]); bad("Kod noto'g'ri yoki muddati tugagan", 400); }
+  await run(`UPDATE ${a.kind === 'p' ? 'parent_accounts' : 'student_accounts'} SET pass=? WHERE student_id=?`, [hash(np), a.student_id]); await run('DELETE FROM reset_codes WHERE login=?', [lg]);
+  await audit({ id: 0, name: 'Parolni tiklash', role: a.kind === 'p' ? 'parent' : 'student' }, 'password', 'account', a.student_id, null, { via: 'telegram' }); return { ok: 1 };
+});
+// ===== Qarzdorlarga Telegram eslatmasi (qo'lda yoki har oyning belgilangan kunida avtomatik) =====
+// Bir o'quvchiga 6 kundan tez-tez yuborilmaydi; Telegram ulanmagan oilalar sanaladi, lekin xabar bormaydi.
+async function finRemind({ class_id = 0, min_debt = 0 } = {}) {
+  const cfg = await tgCfg(); if (!cfg.bot_token || cfg.ev_remind === '0') return { debtors: 0, sent: 0, no_telegram: 0, recent: 0, disabled: true };
+  const org = (await finCfg()).org_name || 'Maktab', since = dAdd(tashkentToday(), -5);
+  const rows = await q(`SELECT s.id,s.name,(SELECT COALESCE(SUM(amount),0) FROM charges WHERE student_id=s.id)-(SELECT COALESCE(SUM(amount),0) FROM payments WHERE student_id=s.id AND status='ok') bal FROM students s WHERE s.status='faol'${class_id ? ' AND s.class_id=?' : ''}`, class_id ? [class_id] : []);
+  const out = { debtors: 0, sent: 0, no_telegram: 0, recent: 0 }; const on = (await finCfg()).click_service_id || (await finCfg()).payme_merchant_id;
+  for (const x of rows) {
+    if (!(x.bal > min_debt)) continue; out.debtors++;
+    if (await one('SELECT 1 x FROM remind_log WHERE student_id=? AND sent_on>=?', [x.id, since])) { out.recent++; continue; }
+    const links = await q('SELECT chat_id FROM tg_links WHERE student_id=?', [x.id]); if (!links.length) { out.no_telegram++; continue; }
+    for (const l of links) tgPush(l.chat_id, `💰 <b>${esc(x.name)}</b>: to'lov eslatmasi\nJoriy qarz: <b>${Math.round(x.bal).toLocaleString('ru-RU')} so'm</b> (${esc(org)}).\nTo'lash: maktab saytida «To'lovlar» bo'limi${on ? ' (Click/Payme orqali ham mumkin)' : ''}. To'lov qilgan bo'lsangiz, e'tibor bermang.`);
+    await run('INSERT INTO remind_log(student_id,sent_on) VALUES(?,?) ON CONFLICT(student_id) DO UPDATE SET sent_on=excluded.sent_on', [x.id, tashkentToday()]); out.sent++;
+  }
+  return out;
+}
+exports.autoRemind = async () => { // server.js har 30 daqiqada chaqiradi: belgilangan kuni 10:00 dan keyin bir marta
+  await init(); const c = await finCfg(), day = +(c.remind_day || 0), t = tashkentToday(), h = (new Date().getUTCHours() + 5) % 24;
+  if (!day || +t.slice(8) !== day || h < 10 || c.remind_last === t) return null;
+  await finSet('remind_last', t); const r = await finRemind({ min_debt: +(c.remind_min || 0) }); console.log('Avto-eslatma:', JSON.stringify(r)); return r;
+};
+r('POST', '/fin/remind', async ({ u, b }) => { await needFin(u); const r = await finRemind({ class_id: +b.class_id || 0, min_debt: Math.max(0, +b.min_debt || 0) }); await audit(u, 'remind', 'fin', '-', null, r); return r; });
+// ===== Yangi o'quv yiliga o'tkazish =====
+// Tarix saqlanadi: baho va davomat eski sinf yozuvida qoladi, sinf arxivga o'tadi (arxivdan jurnalni ko'rish mumkin). O'quvchilar yangi sinfga ko'chadi, bitiruvchilar 'arxiv' holatiga o'tadi.
+const nextYear = y => { const m = /^(\d{4})\D+(\d{4})$/.exec(String(y || '')); return m ? `${+m[1] + 1}-${+m[2] + 1}` : ''; };
+const nextClass = (name, fin) => { const m = /^(\d{1,2})(.*)$/.exec(String(name).trim()); if (!m) return { to: String(name), grad: false }; const n = +m[1]; return n >= fin ? { to: null, grad: true } : { to: `${n + 1}${m[2]}`, grad: false }; };
+r('GET', '/year/preview', async ({ u, qs }) => {
+  need(u, 'admin'); const fin = Math.min(12, Math.max(1, +qs.final_grade || 11));
+  const cls = await q("SELECT c.id,c.name,c.year,(SELECT name FROM users WHERE id=c.homeroom_id) homeroom,(SELECT COUNT(*) FROM students s WHERE s.class_id=c.id AND s.status='faol') n,(SELECT COALESCE(SUM(ch.amount),0) FROM charges ch JOIN students s ON s.id=ch.student_id WHERE s.class_id=c.id AND s.status='faol')-(SELECT COALESCE(SUM(p.amount),0) FROM payments p JOIN students s ON s.id=p.student_id WHERE s.class_id=c.id AND s.status='faol' AND p.status='ok') debt FROM classes c WHERE c.archived=0 ORDER BY c.name");
+  const ys = cls.map(c => c.year).sort(); const cur = ys[ys.length - 1] || '';
+  return { current_year: cur, new_year: nextYear(cur), final_grade: fin, today: tashkentToday(), classes: cls.map(c => ({ ...c, ...nextClass(c.name, fin), debt: Math.max(0, c.debt || 0) })) };
+});
+r('POST', '/year/promote', async ({ u, b }) => {
+  need(u, 'admin'); if (b.confirm !== 'OTKAZISH') bad('Tasdiqlash uchun confirm:"OTKAZISH" yuboring');
+  const ny = String(b.new_year || '').trim(); if (!/^\d{4}-\d{4}$/.test(ny)) bad("Yangi o'quv yili YYYY-YYYY ko'rinishida bo'lsin (masalan, 2027-2028)");
+  const last = b.last_day ? String(b.last_day) : tashkentToday(); dateOk(last);
+  const plan = Array.isArray(b.plan) ? b.plan : []; if (!plan.length) bad("O'tkazish rejasi bo'sh");
+  const seen = new Set(), steps = [], sum = [];
+  for (const it of plan) {
+    const id = +it.class_id; if (seen.has(id)) bad('Sinf ikki marta kiritilgan'); seen.add(id);
+    const c = await one('SELECT * FROM classes WHERE id=? AND archived=0', [id]); if (!c) bad(`Sinf topilmadi yoki allaqachon arxivda (id ${id})`);
+    const n = (await one("SELECT COUNT(*) n FROM students WHERE class_id=? AND status='faol'", [id])).n, to = it.to == null || it.to === '' ? null : String(it.to).trim().slice(0, 20);
+    if (to !== null) {
+      if (!to) bad("Yangi sinf nomi bo'sh"); if (to === c.name && ny === c.year) bad(`${c.name}: yangi sinf eskisi bilan bir xil bo'lib qoldi`);
+      steps.push({ sql: 'INSERT OR IGNORE INTO classes(name,year,archived) VALUES(?,?,0)', args: [to, ny] });
+      if (b.keep_homeroom) steps.push({ sql: 'UPDATE classes SET homeroom_id=? WHERE name=? AND year=? AND homeroom_id IS NULL', args: [c.homeroom_id, to, ny] });
+      if (b.copy_fee) steps.push({ sql: 'INSERT OR IGNORE INTO class_fee(class_id,monthly) SELECT c2.id,f.monthly FROM class_fee f JOIN classes c2 ON c2.name=? AND c2.year=? WHERE f.class_id=?', args: [to, ny, id] });
+      steps.push({ sql: "UPDATE students SET class_id=(SELECT id FROM classes WHERE name=? AND year=?) WHERE class_id=? AND status='faol'", args: [to, ny, id] });
+    } else steps.push({ sql: "UPDATE students SET status='arxiv' WHERE class_id=? AND status='faol'", args: [id] });
+    steps.push({ sql: 'UPDATE classes SET archived=1 WHERE id=?', args: [id] }, { sql: 'UPDATE timetable SET valid_to=? WHERE class_id=? AND (valid_to IS NULL OR valid_to>?)', args: [last, id, last] });
+    sum.push({ from: c.name, to, students: n });
+  }
+  let backup = null; try { if (global.SCHOOL_BACKUP) backup = (await global.SCHOOL_BACKUP.run()).name; } catch { /* zaxira ixtiyoriy */ }
+  await db.batch(steps, 'write'); await audit(u, 'promote', 'year', ny, null, { plan: sum, last_day: last, backup });
+  return { ok: 1, new_year: ny, moved: sum.filter(x => x.to).reduce((a, x) => a + x.students, 0), graduated: sum.filter(x => !x.to).reduce((a, x) => a + x.students, 0), backup, classes: sum };
+});
 // ===== Login urinishlarini cheklash (jarayon xotirasida; bir nechta nusxa bo'lsa har biri alohida hisoblaydi) =====
 const FAILS = new Map(), MAXF = 8, WIN = 10 * 60e3;
 const failKey = (ip, login) => ip + '|' + String(login || '').toLowerCase().slice(0, 40);
@@ -907,7 +1312,7 @@ r('GET', '/public/home', async () => {
   const s = Object.fromEntries((await q('SELECT key,value FROM settings')).map(x => [x.key, x.value])), on = s.public_leaders === '1';
   const d = {
     school_name: s.school_name, logo: s.logo || null, brand: s.brand || null,
-    stats: { classes: (await one('SELECT COUNT(*) n FROM classes')).n, students: (await one("SELECT COUNT(*) n FROM students WHERE status='faol'")).n, teachers: (await one("SELECT COUNT(*) n FROM users WHERE role='teacher' AND is_active=1")).n },
+    stats: { classes: (await one('SELECT COUNT(*) n FROM classes WHERE archived=0')).n, students: (await one("SELECT COUNT(*) n FROM students WHERE status='faol'")).n, teachers: (await one("SELECT COUNT(*) n FROM users WHERE role='teacher' AND is_active=1")).n },
     leaders: on ? { week: await board('week', null, true), month: await board('month', null, true) } : null
   };
   HOME = { t: Date.now(), d }; return d;
@@ -926,7 +1331,7 @@ exports.handler = async ev => {
     const path = (ev.path || '').replace(/^\/(\.netlify\/functions\/api|api)/, '') || '/';
     const method = ev.httpMethod, hit = routes.find(x => x[0] === method && x[1].test(path));
     if (!hit) bad('Topilmadi', 404);
-    let u = null; const open = path.startsWith('/pay/') || path === '/login' || path === '/link-login' || path === '/public' || path === '/public/home' || path === '/logout';
+    let u = null; const open = path.startsWith('/pay/') || path.startsWith('/tg/webhook/') || path === '/forgot' || path === '/forgot-confirm' || path === '/login' || path === '/link-login' || path === '/public' || path === '/public/home' || path === '/logout';
     if (!open) {
       const ck = /(?:^|;\s*)sid=([^;]+)/.exec(ev.headers?.cookie || ''); const d = unsign(ck && ck[1]);
       if (d && (d.k === 's' || d.k === 'p')) { // o'quvchi/ota-ona sessiyasi: parol almashtirilsa yoki hisob o'chirilsa/bloklansa darhol bekor bo'ladi

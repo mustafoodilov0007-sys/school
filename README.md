@@ -54,6 +54,33 @@ Netlify'da Import from Git (build buyrug'i kerak emas), o'zgaruvchilar: `TURSO_D
 - Click/Payme: kabinetlarida URL: `<domen>/api/pay/payme`, `<domen>/api/pay/click/prepare`, `<domen>/api/pay/click/complete`. **Haqiqiy to'lovdan oldin ularning sandbox/test muhitida albatta sinab ko'ring**: integratsiya faqat simulyatsiya bilan tekshirilgan.
 - Sirli kalitlar va shaxsiy havolalar zaxira nusxaga kirmaydi.
 
+## Yangi o'quv yiliga o'tkazish
+- Sinflar → «Yangi o'quv yiliga o'tkazish»: har bir sinf uchun yangi sinf nomi (6-A kabi, taklif qilinadi) yoki «Bitiradi». O'quvchilar yangi sinfga ko'chadi, bitiruvchilar `arxiv` holatiga o'tadi (kirishi yopiladi), eski sinflar arxivga tushadi va eski jadval kiritilgan sanada tugaydi. Ixtiyoriy: sinf tarifini nusxalash, sinf rahbarini qoldirish. Bir nechta eski sinfni bitta yangi sinfga birlashtirish mumkin.
+- Tarix saqlanadi: baho, davomat va jurnallar eski sinf yozuvida qoladi. «Arxiv sinflar» orqali eski jurnalni ko'rish mumkin (boshqa sinfga o'tgan yoki bitirgan o'quvchilar ham ko'rinadi). O'quvchi kabinetida o'z baholari tarixi saqlanadi.
+- Tasdiqlash uchun `OTKAZISH` yoziladi. Boshlashdan oldin server avto-zaxira oladi (Railway), baribir qo'lda zaxirani yuklab oling. Amalni qaytarib bo'lmaydi.
+- Eslatma: bitiruvchilarning qarzi buxgalteriya hisobotlaridan chiqib ketadi (oynada ko'rsatiladi). Yangi o'quv yili uchun chorak sanalarini Sozlamalar'da kiriting; fan o'qituvchilari va jadvalni yangi sinflar uchun kiriting.
+
+## Qarz eslatmasi
+To'lovlar → Qoldiq: «Qarzdorlarga Telegram eslatmasi» (barcha yoki tanlangan sinf). Bir oilaga 6 kundan tez-tez yuborilmaydi; Telegram ulanmagan oilalar sanab ko'rsatiladi. To'lovlar → Sozlamalar: har oyning tanlangan kuni (1–28) 10:00 dan keyin avtomatik eslatma va minimal qarz. Eslatma turini Telegram sozlamalarida o'chirish mumkin. Avtomatik yuborish faqat doimiy serverda (Railway) ishlaydi.
+
+## Parolni tiklash va avto-zaxira
+- **Parolni tiklash**: kirish oynasida «Telegram orqali tiklash». Ota-ona yoki o'quvchi logini kiritadi, 6 xonali bir martalik kod (10 daqiqa) ota-onaning ulangan Telegramiga yuboriladi, kod bilan yangi parol qo'yiladi (kamida 8 belgi). Login bor-yo'qligi oshkor qilinmaydi; urinishlar cheklangan (IP va login bo'yicha, 5 xato kodni bekor qiladi, 60 soniyada bir kod). Eski sessiyalar bekor bo'ladi. Telegram ulanmagan bo'lsa yoki xodim bo'lsa, avvalgidek sinf rahbari/administrator yangi parol beradi.
+- **Avto-zaxira** (Railway serveri): har kuni Toshkent 03:00 dan keyin siqilgan JSON fayl, oxirgi 14 tasi saqlanadi (`BACKUP_KEEP`). Papka: `BACKUP_DIR` yoki Railway Volume ichidagi `backups`. **Volume ulanmagan bo'lsa fayllar deploydan keyin o'chadi**: Sozlamalar → «Avtomatik zaxira» kartasi buni ogohlantiradi. Kartada ro'yxat, yuklab olish va «Hozir zaxira olish». Tiklash: yuklab olingan faylni Xodimlar → tiklash orqali.
+- Zaxira fayllarida shaxsiy ma'lumot bor: ularni xavfsiz joyda saqlang.
+
+## Dars jadvali versiyalari
+- Har bir dars «qaysi sanadan qaysi sanagacha» amal qiladi. Jadvalni o'zgartirish yoki darsni o'chirish faqat tanlangan **kuchga kirish sanasidan** boshlab ta'sir qiladi; eski dars tarixga qoladi, shuning uchun o'tgan jurnal ustunlari, davomat va «jurnal to'ldirilishi» hisobotlari buzilmaydi.
+- O'tmish sanasiga o'zgartirish taqiqlanadi. Dars qo'shish mumkin.
+- **Yangi versiya (semestr)**: tanlangan sanadan boshlab amaldagi jadval nusxalanadi, eskisi bir kun oldin tugaydi; so'ng yangi nusxani erkin tahrirlaysiz. Yuqoridagi «Jadval sanasi» orqali istalgan davrdagi jadvalni ko'rish mumkin (o'tmish faqat ko'rish uchun).
+- To'qnashuv (o'qituvchi, sinf, xona) faqat amal qilish oralig'i kesishgan darslar orasida tekshiriladi. O'quvchi kabineti va «bugungi darslar» faqat bugun amaldagi jadvalni ko'rsatadi.
+- Eslatma: fan o'qituvchisi yangi versiyada boshqa xodimga o'zgarsa, jurnal ruxsati uchun Sinflar bo'limida fanni shu xodimga biriktirishni unutmang.
+
+## Xabarlar (chat) va Telegram
+- **Xabarlar** bo'limi: xodimlar o'zaro, xodim ↔ ota-ona/o'quvchi. O'qituvchi faqat o'z sinfi (sinf rahbari yoki dars beradigan sinf) oilalariga yoza oladi; administrator/direktor hammaga. Ota-ona va o'quvchi faqat o'z sinf ustozlari va ma'muriyatga yozadi; o'quvchilar bir-biriga va ota-ona o'quvchiga yoza olmaydi. Yangi xabar nishoni menyuda ko'rinadi (har 20 soniyada yangilanadi), ochiq suhbat har 5 soniyada.
+- **Telegram** (ota-onalarga): Sozlamalar → «Telegram»: @BotFather'dan bot tokeni → Saqlash → «Webhookni ulash» (sayt https da bo'lishi shart). Ota-ona Profil bo'limida «Telegramni ulash» tugmasini bosadi, botda Start bosadi. Xabarlar: sababsiz kelmadi/kech qoldi, yangi baho, to'lov (qoldiq bilan), ota-onalarga e'lon, yangi chat xabari (matnsiz). Har turini Sozlamalar'da o'chirish mumkin. Bot tokeni va ulanishlar zaxira nusxaga kirmaydi.
+- Telegram xabarlari server jarayonida yuboriladi: Railway (doimiy server) uchun mos; Netlify funksiyasida ishonchli emas.
+- Chat yozishmalari zaxira nusxaga kirmaydi va ma'muriyat tomonidan o'qilmaydi (maxfiylik). Kerak bo'lsa moderatsiya keyin qo'shiladi.
+
 ## Boshqa imkoniyatlar
 - Chorak/yillik baholar (tortilgan o'rtacha, o'qituvchi tasdiqlaydi) va qaydnoma; xodim paroli; Excel (.xlsx) orqali o'quvchilar yuklash; PWA (telefonga o'rnatish); «bugungi darslarim»; har bir o'quvchiga shaxsiy kirish havolasi (`/k/...`).
 
@@ -61,4 +88,11 @@ Netlify'da Import from Git (build buyrug'i kerak emas), o'zgaruvchilar: `TURSO_D
 `npm test` (SQLite bazada, `/tmp/school.db` ni o'zi tozalaydi): rollar, jadval to'qnashuvlari, baho/davomat, o'quvchi/ota-ona hisoblari, nazorat ruxsati, zaxira-tiklash, migratsiya.
 
 ## Rejada (hali yo'q)
-Chat (ota-ona, o'quvchi, xodim), ota-onaga Telegram xabarlari, dars jadvalining amal qilish muddati, o'quvchi/ota-ona parolini tiklash oqimi, avtomatik zaxira.
+O'quvchi/ota-ona parolini tiklash oqimi, avtomatik zaxira.
+
+## Chat moderatsiyasi va monitoring
+- **Xabarni o'chirish:** har kim o'z xabarini o'chiradi; admin/direktor istalgan shikoyat qilingan xabarni o'chiradi. O'chirish "yumshoq": foydalanuvchiga "Xabar o'chirildi" ko'rinadi, yozuv esa shikoyatni ko'rish uchun bazada qoladi.
+- **Shikoyat:** suhbat ishtirokchisi boshqaning xabariga shikoyat qiladi (soatiga 10 tagacha). Admin chatdagi «Shikoyatlar» tugmasida ko'radi va faqat shu xabar atrofidagi yozishmani ochadi (boshqa suhbatlarni o'qimaydi).
+- **Cheklash:** admin/direktor o'quvchi yoki ota-onani 1–365 kunga yozishdan cheklaydi (sabab ko'rinadi, o'qish mumkin). Xodimlar cheklanmaydi. Barcha moderator amallari audit jurnaliga yoziladi.
+- **/health:** baza javob bersa `200 {"status":"ok"}`, aks holda `503`. UptimeRobot: HTTP(s) monitor, URL `https://SAYT/health`, interval 5 daqiqa.
+- **Tizim holati kartasi** (Sozlamalar): baza tezligi, server ishlash vaqti, zaxira holati va ogohlantirishlar (doimiy baza yo'q, SESSION_SECRET qisqa, avto-zaxira eskirgan).

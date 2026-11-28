@@ -2,6 +2,9 @@
 const http = require('http'), fs = require('fs'), path = require('path'), zlib = require('zlib');
 const { handler } = require('./netlify/functions/api');
 const PUB = path.join(__dirname, 'public');
+const API = require('./netlify/functions/api');
+require('./backup')(API.backupData);
+setInterval(() => API.autoRemind().catch(e => console.error('Avto-eslatma xatosi:', e.message)), 30 * 60e3).unref();
 const MIME = { '.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.json': 'application/json', '.webmanifest': 'application/manifest+json' };
 const SEC = {
   'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin',
@@ -16,7 +19,12 @@ if (!process.env.TURSO_DATABASE_URL && !process.env.RAILWAY_VOLUME_MOUNT_PATH) c
 const server = http.createServer((req, res) => {
   let url;
   try { url = new URL(req.url, 'http://x'); } catch { res.writeHead(400); return res.end(); }
-  if (url.pathname === '/health') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end('ok'); }
+  if (url.pathname === '/health') { // UptimeRobot: 200 + "status":"ok" faqat baza javob bersa, aks holda 503
+    const to = new Promise((_, no) => setTimeout(() => no(new Error('timeout')), 5000));
+    Promise.race([API.health(), to]).then(x => { res.writeHead(x.ok ? 200 : 503, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(x.body)); },
+      () => { res.writeHead(503, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end('{"status":"error"}'); });
+    return;
+  }
   if (url.pathname.startsWith('/api/')) {
     const chunks = []; let size = 0, dead = false; const LIM = url.pathname === '/api/restore' ? 5e7 : 2e6; // zaxirani tiklash katta bo'lishi mumkin
     req.on('error', () => { dead = true; });
